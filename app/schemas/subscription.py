@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Literal
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Optional
 from datetime import datetime, date
 import uuid
 
@@ -25,31 +25,31 @@ class SubscriptionTierUpdate(BaseModel):
 
 class SubscriptionTierResponse(SubscriptionTierBase):
     model_config = ConfigDict(from_attributes=True)
-
     id: int
     is_active: bool
 
 
 class SubscriptionBase(BaseModel):
     tier_id: int
-    status: Literal["pending", "active", "suspended", "cancelled", "expired"]
+    status: str
     start_date: date
     end_date: Optional[date] = None
 
 
 class SubscriptionCreate(SubscriptionBase):
     user_id: uuid.UUID
+    restaurant_id: uuid.UUID
 
 
 class SubscriptionUpdate(BaseModel):
-    status: Optional[Literal["pending", "active", "suspended", "cancelled", "expired"]] = None
+    status: Optional[str] = None
     end_date: Optional[date] = None
 
 
 class SubscriptionResponse(SubscriptionBase):
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
+    restaurant_id: uuid.UUID
     user_id: uuid.UUID
     created_at: datetime
     updated_at: datetime
@@ -71,6 +71,6 @@ class DailyBalanceUpdate(BaseModel):
 
 class DailyBalanceResponse(DailyBalanceBase):
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
+    restaurant_id: uuid.UUID
     subscription_id: uuid.UUID

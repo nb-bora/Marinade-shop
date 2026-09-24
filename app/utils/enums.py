@@ -27,3 +27,18 @@ class CommandeStatut(str, Enum):
     SERVIE = "servie"
     ANNULEE = "annulee"
     PAYEE = "payee"
+    PAYMENT_PENDING = "paiement_en_attente"
+    PAYMENT_REVIEW = "paiement_a_verifier"
+
+
+class PaymentStatus(str, Enum):
+    INITIATED = "initiated"
+    PENDING = "pending"
+    PROCESSING = "processing"
+    SUCCESS = "success"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    REVERSED = "reversed"
+    REFUNDED = "refunded"
+    EXPIRED = "expired"
+    MANUAL_REVIEW = "manual_review"

@@ -4,6 +4,11 @@ from app.models.restaurant import (
     Restaurant,
     Menu,
     MenuCategory,
+    Composant,
+    Combinaison,
+    CombinaisonComposant,
+    StockComposant,
+    StockMouvement,
     Plat,
     Boisson,
     Table,
@@ -52,6 +57,86 @@ class MenuCategoryRepository(BaseRepository[MenuCategory]):
         return self.db.query(MenuCategory).filter(
             MenuCategory.restaurant_id == restaurant_id
         ).all()
+
+
+class ComposantRepository(BaseRepository[Composant]):
+    def __init__(self, db: Session):
+        super().__init__(Composant, db)
+
+    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[Composant]:
+        return self.db.query(Composant).filter(
+            Composant.restaurant_id == restaurant_id
+        ).all()
+
+    def get_available_by_ids(self, restaurant_id: uuid.UUID, component_ids: List[uuid.UUID]) -> List[Composant]:
+        return self.db.query(Composant).filter(
+            Composant.restaurant_id == restaurant_id,
+            Composant.id.in_(component_ids),
+            Composant.disponible == True
+        ).all()
+
+
+class CombinaisonRepository(BaseRepository[Combinaison]):
+    def __init__(self, db: Session):
+        super().__init__(Combinaison, db)
+
+    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[Combinaison]:
+        return self.db.query(Combinaison).filter(
+            Combinaison.restaurant_id == restaurant_id
+        ).all()
+
+    def get_active_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[Combinaison]:
+        return self.db.query(Combinaison).filter(
+            Combinaison.restaurant_id == restaurant_id,
+            Combinaison.disponible == True
+        ).all()
+
+
+class CombinaisonComposantRepository(BaseRepository[CombinaisonComposant]):
+    def __init__(self, db: Session):
+        super().__init__(CombinaisonComposant, db)
+
+    def get_by_combinaison_id(self, combinaison_id: uuid.UUID) -> List[CombinaisonComposant]:
+        return self.db.query(CombinaisonComposant).filter(
+            CombinaisonComposant.combinaison_id == combinaison_id
+        ).all()
+
+    def replace_for_combinaison(self, combinaison_id: uuid.UUID, component_ids: List[uuid.UUID]) -> None:
+        self.db.query(CombinaisonComposant).filter(
+            CombinaisonComposant.combinaison_id == combinaison_id
+        ).delete(synchronize_session=False)
+        for component_id in component_ids:
+            self.create({
+                "combinaison_id": combinaison_id,
+                "composant_id": component_id,
+                "obligatoire": True
+            })
+
+
+class StockComposantRepository(BaseRepository[StockComposant]):
+    def __init__(self, db: Session):
+        super().__init__(StockComposant, db)
+
+    def get_by_composant_id(self, composant_id: uuid.UUID, lock: bool = False) -> Optional[StockComposant]:
+        query = self.db.query(StockComposant).filter(StockComposant.composant_id == composant_id)
+        if lock:
+            query = query.with_for_update()
+        return query.first()
+
+    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[StockComposant]:
+        return self.db.query(StockComposant).join(Composant).filter(
+            Composant.restaurant_id == restaurant_id
+        ).all()
+
+
+class StockMouvementRepository(BaseRepository[StockMouvement]):
+    def __init__(self, db: Session):
+        super().__init__(StockMouvement, db)
+
+    def get_by_composant_id(self, composant_id: uuid.UUID) -> List[StockMouvement]:
+        return self.db.query(StockMouvement).filter(
+            StockMouvement.composant_id == composant_id
+        ).order_by(StockMouvement.created_at.desc()).all()
 
 
 class PlatRepository(BaseRepository[Plat]):

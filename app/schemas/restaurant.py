@@ -98,6 +98,89 @@ class MenuCategoryResponse(MenuCategoryBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ComposantBase(BaseModel):
+    nom: str = Field(..., min_length=1, max_length=255)
+    type: str = Field(..., min_length=1, max_length=30)
+    prix_supplement: Decimal = Field(default=0, ge=0)
+    devise: str = Field(default="XAF", max_length=3)
+    disponible: bool = True
+    stock_unite: str = Field(default="portion", min_length=1, max_length=20)
+    description: Optional[str] = None
+    attributs_jsonb: Optional[dict] = None
+
+
+class ComposantCreate(ComposantBase):
+    pass
+
+
+class ComposantUpdate(BaseModel):
+    nom: Optional[str] = Field(None, min_length=1, max_length=255)
+    type: Optional[str] = Field(None, min_length=1, max_length=30)
+    prix_supplement: Optional[Decimal] = Field(None, ge=0)
+    devise: Optional[str] = Field(None, max_length=3)
+    disponible: Optional[bool] = None
+    stock_unite: Optional[str] = Field(None, min_length=1, max_length=20)
+    description: Optional[str] = None
+    attributs_jsonb: Optional[dict] = None
+
+
+class ComposantResponse(ComposantBase):
+    id: uuid.UUID
+    restaurant_id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StockComposantResponse(BaseModel):
+    composant_id: uuid.UUID
+    quantite: Decimal
+    reservee: Decimal
+    disponible: Decimal
+    seuil_alerte: Decimal
+    updated_at: datetime
+
+
+class StockMouvementCreate(BaseModel):
+    type: str = Field(..., pattern="^(entree|ajustement|perte)$")
+    quantite: Decimal = Field(..., gt=0)
+    notes: Optional[str] = None
+
+
+class CombinaisonBase(BaseModel):
+    nom: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    prix: Decimal = Field(..., gt=0)
+    devise: str = Field(default="XAF", max_length=3)
+    disponible: bool = True
+    menu_id: Optional[uuid.UUID] = None
+
+
+class CombinaisonCreate(CombinaisonBase):
+    composant_ids: List[uuid.UUID] = Field(..., min_length=1)
+
+
+class CombinaisonUpdate(BaseModel):
+    nom: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    prix: Optional[Decimal] = Field(None, gt=0)
+    devise: Optional[str] = Field(None, max_length=3)
+    disponible: Optional[bool] = None
+    menu_id: Optional[uuid.UUID] = None
+    composant_ids: Optional[List[uuid.UUID]] = Field(None, min_length=1)
+
+
+class CombinaisonResponse(CombinaisonBase):
+    id: uuid.UUID
+    restaurant_id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+    composant_ids: List[uuid.UUID] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class PlatBase(BaseModel):
     nom: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
@@ -203,9 +286,11 @@ class TableResponse(TableBase):
 class CommandeItemBase(BaseModel):
     plat_id: Optional[uuid.UUID] = None
     boisson_id: Optional[uuid.UUID] = None
+    combinaison_id: Optional[uuid.UUID] = None
     quantite: int = Field(..., gt=0)
-    prix_unitaire: Decimal = Field(..., gt=0)
-    total: Decimal = Field(..., ge=0)
+    prix_unitaire: Optional[Decimal] = Field(None, gt=0)
+    total: Optional[Decimal] = Field(None, ge=0)
+    supplement_ids: List[uuid.UUID] = []
     notes: Optional[str] = None
 
 
@@ -216,6 +301,8 @@ class CommandeItemCreate(CommandeItemBase):
 class CommandeItemResponse(CommandeItemBase):
     id: uuid.UUID
     commande_id: uuid.UUID
+    supplements_total: Decimal = Decimal("0")
+    details_jsonb: Optional[dict] = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -229,15 +316,21 @@ class CommandeBase(BaseModel):
     metadata_jsonb: Optional[dict] = None
 
 
-class CommandeCreate(CommandeBase):
-    pass
+class CommandeCreate(BaseModel):
+    # ``total`` and ``taux_service`` are accepted only for backward-compatible
+    # request parsing; the service always derives them from the restaurant and
+    # its items and ignores client-supplied financial values.
+    table_id: Optional[uuid.UUID] = None
+    statut: str = Field(default="en_cours", max_length=20)
+    total: Decimal = Field(default=0, ge=0)
+    taux_service: Optional[Decimal] = Field(None, ge=0, le=100)
+    metadata_jsonb: Optional[dict] = None
 
 
 class CommandeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     table_id: Optional[uuid.UUID] = None
     statut: Optional[str] = Field(None, max_length=20)
-    total: Optional[Decimal] = Field(None, ge=0)
-    taux_service: Optional[Decimal] = Field(None, ge=0, le=100)
     metadata_jsonb: Optional[dict] = None
 
 

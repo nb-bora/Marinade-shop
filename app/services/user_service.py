@@ -1,32 +1,26 @@
 from typing import Optional, List
+import re
+import uuid
+
+from passlib.context import CryptContext
 from sqlalchemy.orm import Session
+
+from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import UserCreate, UserUpdate
-from app.models.user import User
 from app.utils.logging import get_logger
-import uuid
-import re
 
 logger = get_logger(__name__)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def validate_email(email: str) -> bool:
-    # Basic email validation with additional checks
-    if not email or '@' not in email:
+    if not email or "@" not in email or ".." in email:
         return False
-
-    # Check for consecutive dots
-    if '..' in email:
+    local = email.split("@", 1)[0]
+    if local.startswith(".") or local.endswith("."):
         return False
-
-    # Check for dot at beginning or end of local part
-    local_part = email.split('@')[0]
-    if local_part.startswith('.') or local_part.endswith('.'):
-        return False
-
-    # Basic regex pattern
-    pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-    return re.match(pattern, email) is not None
+    return re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email) is not None
 
 
 class UserService:
@@ -47,51 +41,24 @@ class UserService:
         return self.user_repo.get_by_role(role, skip, limit)
 
     def create_user(self, user_data: UserCreate) -> User:
-        if not validate_email(user_data.email):
-            logger.warning(f"Invalid email format: {user_data.email}")
-            raise ValueError("Invalid email format")
-
         if self.user_repo.email_exists(user_data.email):
-            logger.warning(f"Email already registered: {user_data.email}")
             raise ValueError("Email already registered")
         if self.user_repo.phone_exists(user_data.phone):
-            logger.warning(f"Phone number already registered: {user_data.phone}")
             raise ValueError("Phone number already registered")
-
-        user_dict = user_data.model_dump()
-        # Password hashing should be handled by auth service
-        user = self.user_repo.create(user_dict)
-        logger.info(f"User created successfully: {user.id}")
-        return user
+        values = user_data.model_dump()
+        values["password_hash"] = pwd_context.hash(values.pop("password"))
+        return self.user_repo.create(values)
 
     def update_user(self, user_id: uuid.UUID, user_data: UserUpdate) -> Optional[User]:
         user = self.user_repo.get(str(user_id))
         if not user:
-            logger.warning(f"User not found for update: {user_id}")
             return None
-
-        update_dict = user_data.model_dump(exclude_unset=True)
-
-        # Check email uniqueness if being updated
-        if "email" in update_dict:
-            if not validate_email(update_dict["email"]):
-                logger.warning(f"Invalid email format during update: {update_dict['email']}")
-                raise ValueError("Invalid email format")
-            if update_dict["email"] != user.email:
-                if self.user_repo.email_exists(update_dict["email"]):
-                    logger.warning(f"Email already registered: {update_dict['email']}")
-                    raise ValueError("Email already registered")
-
-        # Check phone uniqueness if being updated
-        if "phone" in update_dict and update_dict["phone"] != user.phone:
-            if self.user_repo.phone_exists(update_dict["phone"]):
-                logger.warning(f"Phone number already registered: {update_dict['phone']}")
-                raise ValueError("Phone number already registered")
-
-        updated_user = self.user_repo.update(user, update_dict)
-        logger.info(f"User updated successfully: {user_id}")
-        return updated_user
+        values = user_data.model_dump(exclude_unset=True)
+        if "email" in values and values["email"] != user.email and self.user_repo.email_exists(values["email"]):
+            raise ValueError("Email already registered")
+        if "phone" in values and values["phone"] != user.phone and self.user_repo.phone_exists(values["phone"]):
+            raise ValueError("Phone number already registered")
+        return self.user_repo.update(user, values)
 
     def delete_user(self, user_id: uuid.UUID) -> bool:
-        user = self.user_repo.delete(str(user_id))
-        return user is not None
+        return self.user_repo.delete(str(user_id)) is not None
