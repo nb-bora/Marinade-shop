@@ -66,10 +66,13 @@ class EasyTransactClient:
         return self._request("POST", "/api/v1/partner/transactions/initiate/", json=payload)
 
     def get_transaction_status(self, *, vendor_reference: str) -> dict[str, Any]:
-        # The supplied excerpt does not document the status query parameters.
-        # Keep the method explicit; callers must enable it only after confirming
-        # the provider's complete OpenAPI contract.
-        raise EasyTransactError("Easy Transact status query contract is not configured")
+        # The endpoint is documented as GET, but the supplied excerpt does not
+        # expose its query schema. Keep the parameter configurable and fail
+        # closed if it is not explicitly enabled.
+        parameter = settings.EASYTRANSACT_STATUS_REFERENCE_PARAM
+        if not parameter:
+            raise EasyTransactError("Easy Transact status query parameter is not configured")
+        return self._request("GET", "/api/v1/partner/transactions/status/", params={parameter: vendor_reference})
 
     def update_webhook_profile(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         # The endpoint is multipart/form-data and may include a binary logo.

@@ -622,9 +622,12 @@ class CommandeService:
 
         # Créer la commande avec le taux de service du restaurant
         commande = self.commande_repo.create({
-            **commande_data.model_dump(),
+            "table_id": commande_data.table_id,
+            "statut": commande_data.statut,
+            "metadata_jsonb": commande_data.metadata_jsonb,
             "restaurant_id": restaurant_id,
-            "taux_service": restaurant.taux_service
+            "total": Decimal("0.00"),
+            "taux_service": restaurant.taux_service,
         })
         
         # Mettre à jour le statut de la table si assignée

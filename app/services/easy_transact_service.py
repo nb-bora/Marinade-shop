@@ -74,8 +74,9 @@ class EasyTransactPaymentService:
             if _amount(commande.total) != data.amount_fcfa:
                 raise HTTPException(status_code=400, detail="Payment amount must equal commande total")
         if data.subscription_id:
-            subscription = self.db.query(__import__("app.models.subscription", fromlist=["Subscription"]).Subscription).filter_by(id=data.subscription_id).first()
-            if subscription is None or subscription.restaurant_id != data.restaurant_id:
+            from app.models.subscription import Subscription
+            subscription = self.db.query(Subscription).filter(Subscription.id == data.subscription_id, Subscription.restaurant_id == data.restaurant_id).first()
+            if subscription is None:
                 raise HTTPException(status_code=404, detail="Subscription not found")
 
     def create_checkout(self, data: EasyTransactCheckoutCreate) -> PaymentIntent:
@@ -105,7 +106,7 @@ class EasyTransactPaymentService:
         self.db.add(intent)
         self.db.flush()
         try:
-            response = EasyTransactClient.from_settings().create_checkout_link(
+            response = EasyTransactClient.from_settings(os.environ.get(config.credential_env_key)).create_checkout_link(
                 description=data.description,
                 amount_xaf=data.amount_fcfa,
                 vendor_reference=vendor_reference,
@@ -125,13 +126,20 @@ class EasyTransactPaymentService:
         return intent
 
     def initiate(self, data: EasyTransactInitiateRequest) -> dict[str, Any]:
-        self.configuration(data.restaurant_id)
-        payload = {
-            "vendor_reference": data.vendor_reference,
-            "amount": str(Decimal(data.amount_fcfa)),
-            "currency_code": data.currency_code,
-            "service_code": data.service_code,
-        }
+        config = self.configuration(data.restaurant_id)
+        from app.services.operator_service import OperatorService
+        operators = OperatorService(self.db)
+        sender_operator = None
+        receiver_operator = None
+        if data.sender_number:
+            _, sender_operator = operators.normalize_mobile(data.sender_number)
+        if data.receiver_number:
+            _, receiver_operator = operators.normalize_mobile(data.receiver_number)
+        if data.operator_id:
+            expected = (sender_operator or receiver_operator)
+            if expected and data.operator_id.upper() != expected.code.upper():
+                raise HTTPException(status_code=400, detail="operator_id does not match the Cameroon number")
+        payload = {"vendor_reference": data.vendor_reference, "amount": str(Decimal(data.amount_fcfa)), "currency_code": data.currency_code, "service_code": data.service_code}
         if data.operator_id:
             payload["operator_id"] = data.operator_id
         if data.sender_number:
@@ -139,7 +147,7 @@ class EasyTransactPaymentService:
         if data.receiver_number:
             payload["receiver_number"] = data.receiver_number
         try:
-            return EasyTransactClient.from_settings().initiate_transaction(payload)
+            return EasyTransactClient.from_settings(os.environ.get(config.credential_env_key)).initiate_transaction(payload)
         except EasyTransactError as exc:
             raise HTTPException(status_code=502, detail="Easy Transact initiation failed") from exc
 
@@ -148,16 +156,20 @@ class EasyTransactPaymentService:
         secret = os.environ.get(secret_name) if config else settings.EASYTRANSACT_WEBHOOK_SECRET
         if not secret or not signature:
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
+        if settings.EASYTRANSACT_WEBHOOK_SIGNATURE_ALGORITHM.lower() not in {"hmac-sha256", "sha256"}:
+            raise HTTPException(status_code=503, detail="Webhook signature algorithm is not supported")
         expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
         supplied = signature.removeprefix("sha256=")
-        if not hmac.compare_digest(expected, supplied):
+        if not hmac.compare_digest(expected.lower(), supplied.lower()):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     def process_webhook(self, payload: dict[str, Any], raw_body: bytes, signature: str | None) -> tuple[PaymentIntent, bool]:
+        """Verify and apply one tenant-scoped provider event atomically."""
         vendor_reference = payload.get("vendor_reference")
         provider_event_id = payload.get("event_id") or payload.get("id")
         provider_status = _status(str(payload.get("status", "")))
-        if not vendor_reference or not provider_event_id or provider_status not in {"initiated", "pending", "processing", "success", "failed", "timeout", "reversed", "refunded", "expired"}:
+        allowed = {"initiated", "pending", "processing", "success", "failed", "timeout", "reversed", "refunded", "expired"}
+        if not vendor_reference or not provider_event_id or provider_status not in allowed:
             raise HTTPException(status_code=400, detail="Invalid Easy Transact webhook payload")
         intent = self.db.query(PaymentIntent).filter(PaymentIntent.vendor_reference == vendor_reference).first()
         if intent is None:
@@ -167,9 +179,14 @@ class EasyTransactPaymentService:
         existing = self.db.query(PaymentEvent).filter(PaymentEvent.provider_event_id == str(provider_event_id)).first()
         if existing:
             return intent, True
+
+        previous = intent.status
+        terminal = {"success", "failed", "reversed", "refunded", "expired"}
+        if previous in terminal and provider_status != previous:
+            raise HTTPException(status_code=409, detail=f"Invalid payment transition from {previous} to {provider_status}")
+
         event = PaymentEvent(payment_intent_id=intent.id, provider_event_id=str(provider_event_id), provider_status=provider_status, raw_payload=payload, signature=signature)
         self.db.add(event)
-        previous = intent.status
         if provider_status == "success" and previous != "success":
             if intent.commande_id is not None:
                 CommandeService(self.db).confirm_payment(intent.commande_id, intent.id)

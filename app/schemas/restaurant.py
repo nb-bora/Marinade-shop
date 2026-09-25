@@ -317,13 +317,9 @@ class CommandeBase(BaseModel):
 
 
 class CommandeCreate(BaseModel):
-    # ``total`` and ``taux_service`` are accepted only for backward-compatible
-    # request parsing; the service always derives them from the restaurant and
-    # its items and ignores client-supplied financial values.
+    model_config = ConfigDict(extra="forbid")
     table_id: Optional[uuid.UUID] = None
     statut: str = Field(default="en_cours", max_length=20)
-    total: Decimal = Field(default=0, ge=0)
-    taux_service: Optional[Decimal] = Field(None, ge=0, le=100)
     metadata_jsonb: Optional[dict] = None
 
 

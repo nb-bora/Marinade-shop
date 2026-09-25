@@ -58,50 +58,70 @@ class TestPaymentMethods:
         assert cash_payment.validate_payment_details({}) == False
         assert cash_payment.validate_payment_details({"amount": -50}) == False
     
-    def test_orange_money_payment_simulation(self):
-        """Test simulation paiement Orange Money"""
+    def test_orange_money_requires_easytransact(self):
+        """Orange Money is not simulated: it must be routed to Easy Transact"""
         orange_payment = OrangeMoneyPayment()
         result = orange_payment.process_payment(
             amount=Decimal("3000.00"),
             payment_details={
-                "phone_number": "+237123456789",
+                "phone_number": "+237655123456",
                 "currency": "XAF"
             }
         )
-        
-        assert "success" in result
-        assert "transaction_id" in result
-        assert result["payment_method"] == "orange_money"
-    
+
+        assert result["success"] == False
+        assert result["status"] == "unsupported"
+        assert result["payment_method"] == "easytransact"
+        assert result["operator"] == "ORANGE_CM"
+        # No fake transaction id may be returned for a non-executed payment.
+        assert "transaction_id" not in result
+
     def test_orange_money_validation(self):
-        """Test validation détails Orange Money"""
+        """Orange Money validation requires a real Orange Cameroon number"""
         orange_payment = OrangeMoneyPayment()
-        
-        # Détails valides
+
+        # Valid Orange number (national prefix 655)
         assert orange_payment.validate_payment_details({
-            "phone_number": "+237123456789",
+            "phone_number": "+237655123456",
             "amount": 1000
         }) == True
-        
-        # Détails invalides
+
+        # Invalid details
         assert orange_payment.validate_payment_details({}) == False
         assert orange_payment.validate_payment_details({"phone_number": "invalid"}) == False
-    
-    def test_mobile_money_payment_simulation(self):
-        """Test simulation paiement Mobile Money"""
+        # Landline / non-mobile prefix
+        assert orange_payment.validate_payment_details({"phone_number": "+237123456789"}) == False
+        # MTN number is not an Orange number
+        assert orange_payment.validate_payment_details({"phone_number": "+237650123456"}) == False
+
+    def test_mobile_money_requires_easytransact(self):
+        """MTN Mobile Money is not simulated: it must be routed to Easy Transact"""
         mobile_payment = MobileMoneyPayment({"provider": "mtn"})
         result = mobile_payment.process_payment(
             amount=Decimal("2000.00"),
             payment_details={
-                "phone_number": "+237987654321",
+                "phone_number": "+237650123456",
                 "currency": "XAF"
             }
         )
-        
-        assert "success" in result
-        assert "transaction_id" in result
-        assert "mtn" in result["payment_method"]
-    
+
+        assert result["success"] == False
+        assert result["status"] == "unsupported"
+        assert result["provider"] == "MTN"
+        assert "transaction_id" not in result
+
+    def test_mobile_money_validation_is_operator_scoped(self):
+        """Mobile Money validation checks the declared operator against the number"""
+        mtn = MobileMoneyPayment({"provider": "mtn"})
+        orange = MobileMoneyPayment({"provider": "orange"})
+        undeclared = MobileMoneyPayment({})
+
+        assert mtn.validate_payment_details({"phone_number": "+237650123456"}) == True
+        assert mtn.validate_payment_details({"phone_number": "+237655123456"}) == False
+        assert orange.validate_payment_details({"phone_number": "+237655123456"}) == True
+        # Without a declared provider the adapter cannot be used.
+        assert undeclared.validate_payment_details({"phone_number": "+237650123456"}) == False
+
     def test_payment_factory(self):
         """Test factory de méthodes de paiement"""
         # Création de méthodes existantes

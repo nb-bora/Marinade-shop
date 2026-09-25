@@ -36,10 +36,14 @@ def normalize_cameroon_mobile(raw: str, operators: tuple[MobileOperator, ...] = 
         raise ValueError("Cameroon mobile numbers must contain 9 national digits")
     if not national.startswith("6"):
         raise ValueError("Only mobile numbers are supported")
-    matches = [operator for operator in operators if any(national.startswith(prefix) for prefix in operator.prefixes)]
+    matches = []
+    for operator in operators:
+        matching = [prefix for prefix in operator.prefixes if national.startswith(prefix)]
+        if matching:
+            matches.append((max(len(prefix) for prefix in matching), operator))
     if not matches:
         raise ValueError("Mobile operator is not supported for Mobile Money")
-    return value, max(matches, key=lambda operator: max(len(prefix) for prefix in operator.prefixes))
+    return value, max(matches, key=lambda pair: pair[0])[1]
 
 
 def normalize_cameroon_phone(raw: str) -> str:

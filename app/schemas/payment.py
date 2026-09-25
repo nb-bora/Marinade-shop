@@ -90,6 +90,25 @@ class PaymentConfigurationResponse(BaseModel):
     updated_at: datetime
 
 
+class CashPaymentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    restaurant_id: uuid.UUID
+    commande_id: uuid.UUID
+    amount_fcfa: int = Field(..., gt=0)
+    idempotency_key: str = Field(..., min_length=8, max_length=120)
+    received_by: uuid.UUID
+    notes: Optional[str] = Field(None, max_length=500)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def normalize_idempotency_key(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key is required")
+        return value
+
+
 class PaymentIntentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
