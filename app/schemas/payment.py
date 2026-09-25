@@ -59,10 +59,16 @@ class PaymentConfigurationUpsert(BaseModel):
     webhook_url: Optional[str] = Field(None, max_length=500)
     success_url: Optional[str] = Field(None, max_length=500)
     failure_url: Optional[str] = Field(None, max_length=500)
-    vendor_reference_prefix: str = Field("MRD", min_length=2, max_length=30, pattern=r"^[A-Za-z0-9_-]+$")
+    vendor_reference_prefix: str = Field(
+        "MRD", min_length=2, max_length=30, pattern=r"^[A-Za-z0-9_-]+$"
+    )
     provider_account_ref: Optional[str] = Field(None, max_length=255)
-    credential_env_key: str = Field("EASYTRANSACT_API_TOKEN", min_length=3, max_length=255)
-    webhook_secret_env_key: str = Field("EASYTRANSACT_WEBHOOK_SECRET", min_length=3, max_length=255)
+    credential_env_key: str = Field(
+        "EASYTRANSACT_API_TOKEN", min_length=3, max_length=255
+    )
+    webhook_secret_env_key: str = Field(
+        "EASYTRANSACT_WEBHOOK_SECRET", min_length=3, max_length=255
+    )
     enabled: bool = True
 
     @field_validator("webhook_url", "success_url", "failure_url")

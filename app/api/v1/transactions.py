@@ -25,13 +25,13 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
         201: {"description": "Transaction créée avec succès."},
         400: {"description": "Données invalides ou logique financière non respectée."},
         401: {"description": "Token absent ou invalide."},
-        403: {"description": "Accès interdit : le rôle POS est requis."}
-    }
+        403: {"description": "Accès interdit : le rôle POS est requis."},
+    },
 )
 def create_transaction(
     transaction_data: TransactionCreate,
-    current_user = Depends(require_pos),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_pos),
+    db: Session = Depends(get_db),
 ):
     transaction_service = TransactionService(db)
     try:
@@ -52,18 +52,20 @@ def create_transaction(
     responses={
         200: {"description": "Transactions récupérées avec succès."},
         401: {"description": "Token absent ou invalide."},
-        404: {"description": "Abonnement introuvable."}
-    }
+        404: {"description": "Abonnement introuvable."},
+    },
 )
 def get_subscription_transactions(
     subscription_id: uuid.UUID,
     skip: int = 0,
     limit: int = 100,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     transaction_service = TransactionService(db)
-    return transaction_service.get_subscription_transactions(subscription_id, skip, limit)
+    return transaction_service.get_subscription_transactions(
+        subscription_id, skip, limit
+    )
 
 
 @router.get(
@@ -79,18 +81,20 @@ def get_subscription_transactions(
         200: {"description": "Transaction trouvée."},
         401: {"description": "Token absent ou invalide."},
         403: {"description": "Accès interdit : rôle POS requis."},
-        404: {"description": "Transaction introuvable."}
-    }
+        404: {"description": "Transaction introuvable."},
+    },
 )
 def get_transaction_by_pos_id(
     pos_transaction_id: str,
-    current_user = Depends(require_pos),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_pos),
+    db: Session = Depends(get_db),
 ):
     transaction_service = TransactionService(db)
     transaction = transaction_service.get_transaction_by_pos_id(pos_transaction_id)
     if not transaction:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found"
+        )
     return transaction
 
 
@@ -105,14 +109,14 @@ def get_transaction_by_pos_id(
     """,
     responses={
         200: {"description": "Transactions de l’utilisateur récupérées avec succès."},
-        401: {"description": "Token absent ou invalide."}
-    }
+        401: {"description": "Token absent ou invalide."},
+    },
 )
 def get_my_transactions(
     skip: int = 0,
     limit: int = 100,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     transaction_service = TransactionService(db)
     return transaction_service.get_user_transactions(current_user.id, skip, limit)
@@ -130,16 +134,18 @@ def get_my_transactions(
     responses={
         200: {"description": "Transaction trouvée."},
         401: {"description": "Token absent ou invalide."},
-        404: {"description": "Transaction introuvable."}
-    }
+        404: {"description": "Transaction introuvable."},
+    },
 )
 def get_transaction(
     transaction_id: uuid.UUID,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     transaction_service = TransactionService(db)
     transaction = transaction_service.get_transaction(transaction_id)
     if not transaction:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found"
+        )
     return transaction

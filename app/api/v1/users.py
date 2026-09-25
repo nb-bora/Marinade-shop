@@ -22,14 +22,14 @@ router = APIRouter(prefix="/users", tags=["users"])
     responses={
         200: {"description": "Liste des utilisateurs récupérée avec succès."},
         401: {"description": "Token absent ou invalide."},
-        403: {"description": "L’utilisateur n’a pas les droits administrateurs."}
-    }
+        403: {"description": "L’utilisateur n’a pas les droits administrateurs."},
+    },
 )
 def get_users(
     skip: int = 0,
     limit: int = 100,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     user_service = UserService(db)
     return user_service.get_all_users(skip, limit)
@@ -46,10 +46,10 @@ def get_users(
     """,
     responses={
         200: {"description": "Profil utilisateur récupéré avec succès."},
-        401: {"description": "Token absent ou invalide."}
-    }
+        401: {"description": "Token absent ou invalide."},
+    },
 )
-def get_current_user_info(current_user = Depends(get_current_user)):
+def get_current_user_info(current_user=Depends(get_current_user)):
     return current_user
 
 
@@ -66,18 +66,20 @@ def get_current_user_info(current_user = Depends(get_current_user)):
         200: {"description": "Utilisateur trouvé."},
         401: {"description": "Token absent ou invalide."},
         403: {"description": "Accès interdit : droits insuffisants."},
-        404: {"description": "Utilisateur introuvable."}
-    }
+        404: {"description": "Utilisateur introuvable."},
+    },
 )
 def get_user(
     user_id: uuid.UUID,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     user_service = UserService(db)
     user = user_service.get_user(user_id)
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
     return user
 
 
@@ -95,13 +97,13 @@ def get_user(
         201: {"description": "Utilisateur créé avec succès."},
         400: {"description": "Données de création invalides."},
         401: {"description": "Token absent ou invalide."},
-        403: {"description": "Accès interdit : droits insuffisants."}
-    }
+        403: {"description": "Accès interdit : droits insuffisants."},
+    },
 )
 def create_user(
     user_data: UserCreate,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     user_service = UserService(db)
     try:
@@ -124,20 +126,22 @@ def create_user(
         400: {"description": "Données invalides ou format incorrect."},
         401: {"description": "Token absent ou invalide."},
         403: {"description": "Accès interdit : droits insuffisants."},
-        404: {"description": "Utilisateur introuvable."}
-    }
+        404: {"description": "Utilisateur introuvable."},
+    },
 )
 def update_user(
     user_id: uuid.UUID,
     user_data: UserUpdate,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     user_service = UserService(db)
     try:
         user = user_service.update_user(user_id, user_data)
         if not user:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            )
         return user
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -156,15 +160,17 @@ def update_user(
         204: {"description": "Utilisateur supprimé avec succès."},
         401: {"description": "Token absent ou invalide."},
         403: {"description": "Accès interdit : droits insuffisants."},
-        404: {"description": "Utilisateur introuvable."}
-    }
+        404: {"description": "Utilisateur introuvable."},
+    },
 )
 def delete_user(
     user_id: uuid.UUID,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     user_service = UserService(db)
     if not user_service.delete_user(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
     return None

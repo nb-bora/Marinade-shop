@@ -1,5 +1,5 @@
 from app.api.dependencies import get_current_user, require_admin, require_tenant_path
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.database import get_db
@@ -11,7 +11,8 @@ from app.services.restaurant_service import (
     TableService,
     CommandeService,
     CombinaisonService,
-    StockService
+    StockService,
+    PlatComposantService,
 )
 from app.schemas.restaurant import (
     RestaurantResponse,
@@ -34,6 +35,9 @@ from app.schemas.restaurant import (
     PlatResponse,
     PlatCreate,
     PlatUpdate,
+    PlatComposantResponse,
+    PlatComposantCreate,
+    PlatComposantUpdate,
     BoissonResponse,
     BoissonCreate,
     BoissonUpdate,
@@ -44,11 +48,36 @@ from app.schemas.restaurant import (
     CommandeCreate,
     CommandeUpdate,
     CommandeItemResponse,
-    CommandeItemCreate
+    CommandeItemCreate,
+    CommandeRefundCreate,
+    CommandeRefundResponse,
 )
+from app.utils.logging import get_logger
 import uuid
+import warnings
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/restaurants", dependencies=[Depends(require_tenant_path)])
+
+
+_DEPRECATED_CMD_HEADER = {"X-Deprecated-Endpoint": "use-ros-orders"}
+
+
+def _mark_deprecated_commande(request: Request, response: Response):
+    warnings.warn(
+        "Legacy Commande model is deprecated. Use ROS Orders (service_sessions → ros_orders) instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    logger.warning(
+        "Deprecated legacy Commande endpoint called: %s %s by user=%s",
+        request.method,
+        request.url.path,
+        request.headers.get("X-User-ID", "unknown"),
+    )
+    for k, v in _DEPRECATED_CMD_HEADER.items():
+        response.headers[k] = v
 
 
 # Restaurants
@@ -66,14 +95,16 @@ router = APIRouter(prefix="/restaurants", dependencies=[Depends(require_tenant_p
     """,
     responses={
         201: {"description": "Restaurant créé avec succès."},
-        400: {"description": "Données invalides ou restaurant déjà existant pour cet utilisateur."},
-        401: {"description": "Token JWT absent ou invalide."}
-    }
+        400: {
+            "description": "Données invalides ou restaurant déjà existant pour cet utilisateur."
+        },
+        401: {"description": "Token JWT absent ou invalide."},
+    },
 )
 def create_restaurant(
     restaurant_data: RestaurantCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     restaurant_service = RestaurantService(db)
     try:
@@ -95,17 +126,18 @@ def create_restaurant(
     responses={
         200: {"description": "Restaurant trouvé."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Aucun restaurant associé à cet utilisateur."}
-    }
+        404: {"description": "Aucun restaurant associé à cet utilisateur."},
+    },
 )
 def get_my_restaurant(
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user), db: Session = Depends(get_db)
 ):
     restaurant_service = RestaurantService(db)
     restaurant = restaurant_service.get_user_restaurant(current_user.id)
     if not restaurant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found"
+        )
     return restaurant
 
 
@@ -121,17 +153,16 @@ def get_my_restaurant(
     """,
     responses={
         200: {"description": "Restaurant trouvé."},
-        404: {"description": "Restaurant introuvable."}
-    }
+        404: {"description": "Restaurant introuvable."},
+    },
 )
-def get_restaurant(
-    restaurant_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_restaurant(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
     restaurant_service = RestaurantService(db)
     restaurant = restaurant_service.get_restaurant(restaurant_id)
     if not restaurant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found"
+        )
     return restaurant
 
 
@@ -150,28 +181,36 @@ def get_restaurant(
         400: {"description": "Données invalides."},
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit."},
-        404: {"description": "Restaurant introuvable."}
-    }
+        404: {"description": "Restaurant introuvable."},
+    },
 )
 def update_restaurant(
     restaurant_id: uuid.UUID,
     restaurant_data: RestaurantUpdate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     restaurant_service = RestaurantService(db)
     restaurant = restaurant_service.get_restaurant(restaurant_id)
     if not restaurant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found"
+        )
 
     # Vérifier que l'utilisateur est le propriétaire ou admin
     if restaurant.user_id != current_user.id and current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized"
+        )
 
     try:
-        updated_restaurant = restaurant_service.update_restaurant(restaurant_id, restaurant_data)
+        updated_restaurant = restaurant_service.update_restaurant(
+            restaurant_id, restaurant_data
+        )
         if not updated_restaurant:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found"
+            )
         return updated_restaurant
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -192,14 +231,14 @@ def update_restaurant(
     responses={
         201: {"description": "Menu créé avec succès."},
         400: {"description": "Données invalides."},
-        401: {"description": "Token JWT absent ou invalide."}
-    }
+        401: {"description": "Token JWT absent ou invalide."},
+    },
 )
 def create_menu(
     restaurant_id: uuid.UUID,
     menu_data: MenuCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     menu_service = MenuService(db)
     try:
@@ -220,13 +259,10 @@ def create_menu(
     """,
     responses={
         200: {"description": "Menus récupérés avec succès."},
-        404: {"description": "Restaurant introuvable."}
-    }
+        404: {"description": "Restaurant introuvable."},
+    },
 )
-def get_restaurant_menus(
-    restaurant_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_restaurant_menus(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
     menu_service = MenuService(db)
     return menu_service.get_restaurant_menus(restaurant_id)
 
@@ -244,17 +280,16 @@ def get_restaurant_menus(
     responses={
         200: {"description": "Menu trouvé."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Menu introuvable."}
-    }
+        404: {"description": "Menu introuvable."},
+    },
 )
-def get_menu(
-    menu_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_menu(menu_id: uuid.UUID, db: Session = Depends(get_db)):
     menu_service = MenuService(db)
     menu = menu_service.get_menu(menu_id)
     if not menu:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Menu not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Menu not found"
+        )
     return menu
 
 
@@ -273,20 +308,22 @@ def get_menu(
         400: {"description": "Données invalides."},
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit."},
-        404: {"description": "Menu introuvable."}
-    }
+        404: {"description": "Menu introuvable."},
+    },
 )
 def update_menu(
     menu_id: uuid.UUID,
     menu_data: MenuUpdate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     menu_service = MenuService(db)
     try:
         updated_menu = menu_service.update_menu(menu_id, menu_data)
         if not updated_menu:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Menu not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Menu not found"
+            )
         return updated_menu
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -308,14 +345,14 @@ def update_menu(
         201: {"description": "Catégorie créée avec succès."},
         400: {"description": "Données invalides."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Menu introuvable."}
-    }
+        404: {"description": "Menu introuvable."},
+    },
 )
 def create_menu_category(
     menu_id: uuid.UUID,
     category_data: MenuCategoryCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     menu_service = MenuService(db)
     try:
@@ -337,13 +374,10 @@ def create_menu_category(
     responses={
         200: {"description": "Catégories récupérées avec succès."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Menu introuvable."}
-    }
+        404: {"description": "Menu introuvable."},
+    },
 )
-def get_menu_categories(
-    menu_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_menu_categories(menu_id: uuid.UUID, db: Session = Depends(get_db)):
     menu_service = MenuService(db)
     return menu_service.get_menu_categories(menu_id)
 
@@ -363,20 +397,22 @@ def get_menu_categories(
         400: {"description": "Données invalides."},
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit."},
-        404: {"description": "Catégorie introuvable."}
-    }
+        404: {"description": "Catégorie introuvable."},
+    },
 )
 def update_menu_category(
     category_id: uuid.UUID,
     category_data: MenuCategoryUpdate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     menu_service = MenuService(db)
     try:
         updated_category = menu_service.update_category(category_id, category_data)
         if not updated_category:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Category not found"
+            )
         return updated_category
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -394,14 +430,14 @@ def update_menu_category(
         201: {"description": "Composant créé et stock initialisé à zéro."},
         400: {"description": "Données invalides ou restaurant introuvable."},
         401: {"description": "Token JWT absent ou invalide."},
-        403: {"description": "Accès interdit pour ce restaurant."}
-    }
+        403: {"description": "Accès interdit pour ce restaurant."},
+    },
 )
 def create_composant(
     restaurant_id: uuid.UUID,
     composant_data: ComposantCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     try:
         return CombinaisonService(db).create_composant(composant_data, restaurant_id)
@@ -417,8 +453,8 @@ def create_composant(
     description="Retourne les bases, sauces et protéines administrées pour construire les combinaisons de plats, avec leur disponibilité et leur prix de supplément.",
     responses={
         200: {"description": "Composants récupérés."},
-        404: {"description": "Restaurant introuvable."}
-    }
+        404: {"description": "Restaurant introuvable."},
+    },
 )
 def get_restaurant_composants(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
     return CombinaisonService(db).get_restaurant_composants(restaurant_id)
@@ -434,8 +470,8 @@ def get_restaurant_composants(restaurant_id: uuid.UUID, db: Session = Depends(ge
         200: {"description": "État du stock physique, réservé et disponible récupéré."},
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit pour ce restaurant."},
-        404: {"description": "Restaurant introuvable."}
-    }
+        404: {"description": "Restaurant introuvable."},
+    },
 )
 def get_restaurant_stock(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
     return StockService(db).get_restaurant_stock(restaurant_id)
@@ -449,17 +485,19 @@ def get_restaurant_stock(restaurant_id: uuid.UUID, db: Session = Depends(get_db)
     description="Ajoute une entrée, un ajustement d’inventaire ou une perte. Les sorties sont contrôlées pour ne jamais dépasser le stock disponible.",
     responses={
         200: {"description": "Stock mis à jour et mouvement journalisé."},
-        400: {"description": "Mouvement invalide, stock insuffisant ou stock réservé trop élevé."},
+        400: {
+            "description": "Mouvement invalide, stock insuffisant ou stock réservé trop élevé."
+        },
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit pour ce composant."},
-        404: {"description": "Composant ou stock introuvable."}
-    }
+        404: {"description": "Composant ou stock introuvable."},
+    },
 )
 def add_stock_movement(
     composant_id: uuid.UUID,
     movement_data: StockMouvementCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     try:
         return StockService(db).add_movement(composant_id, movement_data)
@@ -478,18 +516,20 @@ def add_stock_movement(
         400: {"description": "Données de composant invalides."},
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit pour ce composant."},
-        404: {"description": "Composant introuvable."}
-    }
+        404: {"description": "Composant introuvable."},
+    },
 )
 def update_composant(
     composant_id: uuid.UUID,
     composant_data: ComposantUpdate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     composant = CombinaisonService(db).update_composant(composant_id, composant_data)
     if not composant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Composant not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Composant not found"
+        )
     return composant
 
 
@@ -502,19 +542,23 @@ def update_composant(
     description="Crée une offre composée de plusieurs composants, par exemple riz + sauce tomate + poulet, avec un prix de vente propre à la combinaison.",
     responses={
         201: {"description": "Combinaison tarifée créée avec ses composants."},
-        400: {"description": "Composants inexistants, dupliqués, indisponibles ou rattachés à un autre restaurant."},
+        400: {
+            "description": "Composants inexistants, dupliqués, indisponibles ou rattachés à un autre restaurant."
+        },
         401: {"description": "Token JWT absent ou invalide."},
-        403: {"description": "Accès interdit pour ce restaurant."}
-    }
+        403: {"description": "Accès interdit pour ce restaurant."},
+    },
 )
 def create_combinaison(
     restaurant_id: uuid.UUID,
     combinaison_data: CombinaisonCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     try:
-        return CombinaisonService(db).create_combinaison(combinaison_data, restaurant_id)
+        return CombinaisonService(db).create_combinaison(
+            combinaison_data, restaurant_id
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -526,11 +570,15 @@ def create_combinaison(
     summary="Recommander les combinaisons disponibles",
     description="Retourne uniquement les combinaisons actives dont tous les composants obligatoires sont disponibles. Une sauce épuisée retire donc les offres concernées.",
     responses={
-        200: {"description": "Combinaisons actives et vendables retournées selon les composants disponibles et le stock restant."},
-        404: {"description": "Restaurant introuvable."}
-    }
+        200: {
+            "description": "Combinaisons actives et vendables retournées selon les composants disponibles et le stock restant."
+        },
+        404: {"description": "Restaurant introuvable."},
+    },
 )
-def get_combinaison_recommandations(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_combinaison_recommandations(
+    restaurant_id: uuid.UUID, db: Session = Depends(get_db)
+):
     return CombinaisonService(db).get_recommandations(restaurant_id)
 
 
@@ -541,11 +589,15 @@ def get_combinaison_recommandations(restaurant_id: uuid.UUID, db: Session = Depe
     summary="Lister les combinaisons d’un restaurant",
     description="Retourne les offres composées et leurs prix configurés par l’administrateur.",
     responses={
-        200: {"description": "Combinaisons récupérées avec leur prix et leurs composants."},
-        404: {"description": "Restaurant introuvable."}
-    }
+        200: {
+            "description": "Combinaisons récupérées avec leur prix et leurs composants."
+        },
+        404: {"description": "Restaurant introuvable."},
+    },
 )
-def get_restaurant_combinaisons(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_restaurant_combinaisons(
+    restaurant_id: uuid.UUID, db: Session = Depends(get_db)
+):
     return CombinaisonService(db).get_restaurant_combinaisons(restaurant_id)
 
 
@@ -556,25 +608,33 @@ def get_restaurant_combinaisons(restaurant_id: uuid.UUID, db: Session = Depends(
     summary="Modifier une combinaison tarifée",
     description="Met à jour le prix, les composants ou la disponibilité d’une combinaison.",
     responses={
-        200: {"description": "Combinaison, prix, composants ou disponibilité mis à jour."},
-        400: {"description": "Données invalides ou composant/menu rattaché à un autre restaurant."},
+        200: {
+            "description": "Combinaison, prix, composants ou disponibilité mis à jour."
+        },
+        400: {
+            "description": "Données invalides ou composant/menu rattaché à un autre restaurant."
+        },
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit pour cette combinaison."},
-        404: {"description": "Combinaison introuvable."}
-    }
+        404: {"description": "Combinaison introuvable."},
+    },
 )
 def update_combinaison(
     combinaison_id: uuid.UUID,
     combinaison_data: CombinaisonUpdate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     try:
-        combinaison = CombinaisonService(db).update_combinaison(combinaison_id, combinaison_data)
+        combinaison = CombinaisonService(db).update_combinaison(
+            combinaison_id, combinaison_data
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if not combinaison:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Combinaison not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Combinaison not found"
+        )
     return combinaison
 
 
@@ -593,14 +653,14 @@ def update_combinaison(
     responses={
         201: {"description": "Plat créé avec succès."},
         400: {"description": "Données invalides ou logique métier non respectée."},
-        401: {"description": "Token JWT absent ou invalide."}
-    }
+        401: {"description": "Token JWT absent ou invalide."},
+    },
 )
 def create_plat(
     restaurant_id: uuid.UUID,
     plat_data: PlatCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     plat_service = PlatService(db)
     try:
@@ -617,14 +677,9 @@ def create_plat(
     description="""
     Retourne la liste des plats du restaurant, avec leurs informations principales pour affichage sur la carte et les commandes.
     """,
-    responses={
-        200: {"description": "Plats récupérés avec succès."}
-    }
+    responses={200: {"description": "Plats récupérés avec succès."}},
 )
-def get_restaurant_plats(
-    restaurant_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_restaurant_plats(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
     plat_service = PlatService(db)
     return plat_service.get_restaurant_plats(restaurant_id)
 
@@ -642,17 +697,16 @@ def get_restaurant_plats(
     responses={
         200: {"description": "Plat trouvé."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Plat introuvable."}
-    }
+        404: {"description": "Plat introuvable."},
+    },
 )
-def get_plat(
-    plat_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_plat(plat_id: uuid.UUID, db: Session = Depends(get_db)):
     plat_service = PlatService(db)
     plat = plat_service.get_plat(plat_id)
     if not plat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plat not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Plat not found"
+        )
     return plat
 
 
@@ -671,21 +725,130 @@ def get_plat(
         400: {"description": "Données invalides."},
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit."},
-        404: {"description": "Plat introuvable."}
-    }
+        404: {"description": "Plat introuvable."},
+    },
 )
 def update_plat(
     plat_id: uuid.UUID,
     plat_data: PlatUpdate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     plat_service = PlatService(db)
     try:
         updated_plat = plat_service.update_plat(plat_id, plat_data)
         if not updated_plat:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plat not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Plat not found"
+            )
         return updated_plat
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+# BOM (Bill of Materials) — Plats → Composants
+@router.get(
+    "/plats/{plat_id}/composants",
+    response_model=List[PlatComposantResponse],
+    tags=["restaurant-plats"],
+    summary="Lister les composants d’un plat (BOM)",
+    description="Retourne la nomenclature d’un plat : la liste des composants consommés à chaque commande, avec leur quantité et unité.",
+    responses={
+        200: {"description": "Liste PlatComposant retournée."},
+        401: {"description": "Token invalide."},
+        404: {"description": "Plat introuvable."},
+    },
+)
+def get_plat_composants(plat_id: uuid.UUID, db: Session = Depends(get_db)):
+    return PlatComposantService(db).get_by_plat_id(plat_id)
+
+
+@router.post(
+    "/plats/{plat_id}/composants",
+    response_model=PlatComposantResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["restaurant-plats"],
+    summary="Ajouter un composant à un plat",
+    description="Ajoute une ligne à la nomenclature d’un plat. Le plat et le composant doivent appartenir au même restaurant.",
+    responses={
+        201: {"description": "Ligne BOM créée."},
+        400: {"description": "Restaurant incohérent ou doublon plat+composant."},
+        404: {"description": "Plat ou composant introuvable."},
+    },
+)
+def add_plat_composant(
+    plat_id: uuid.UUID,
+    data: PlatComposantCreate,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        return PlatComposantService(db).create(plat_id, data)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.put(
+    "/plats/{plat_id}/composants/{composant_id}",
+    response_model=PlatComposantResponse,
+    tags=["restaurant-plats"],
+    summary="Modifier une ligne de nomenclature",
+    description="Met à jour la quantité, l’unité ou l’ordre d’un composant dans un plat.",
+    responses={
+        200: {"description": "Mis à jour."},
+        404: {"description": "Ligne BOM introuvable."},
+    },
+)
+def update_plat_composant(
+    plat_id: uuid.UUID,
+    composant_id: uuid.UUID,
+    data: PlatComposantUpdate,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    link = PlatComposantService(db).update(plat_id, composant_id, data)
+    if not link:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="PlatComposant not found"
+        )
+    return link
+
+
+@router.delete(
+    "/plats/{plat_id}/composants/{composant_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["restaurant-plats"],
+    summary="Supprimer une ligne de nomenclature",
+)
+def delete_plat_composant(
+    plat_id: uuid.UUID,
+    composant_id: uuid.UUID,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    ok = PlatComposantService(db).delete(plat_id, composant_id)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="PlatComposant not found"
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put(
+    "/plats/{plat_id}/composants",
+    response_model=List[PlatComposantResponse],
+    tags=["restaurant-plats"],
+    summary="Remplacer toute la nomenclature d’un plat",
+    description="Supprime toutes les lignes existantes et remplace par la liste fournie en une seule opération atomique.",
+)
+def replace_all_plat_composants(
+    plat_id: uuid.UUID,
+    data: List[PlatComposantCreate],
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        return PlatComposantService(db).replace_all_for_plat(plat_id, data)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -705,14 +868,14 @@ def update_plat(
     responses={
         201: {"description": "Boisson créée avec succès."},
         400: {"description": "Données invalides."},
-        401: {"description": "Token JWT absent ou invalide."}
-    }
+        401: {"description": "Token JWT absent ou invalide."},
+    },
 )
 def create_boisson(
     restaurant_id: uuid.UUID,
     boisson_data: BoissonCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     boisson_service = BoissonService(db)
     try:
@@ -734,13 +897,10 @@ def create_boisson(
     responses={
         200: {"description": "Boissons récupérées avec succès."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Restaurant introuvable."}
-    }
+        404: {"description": "Restaurant introuvable."},
+    },
 )
-def get_restaurant_boissons(
-    restaurant_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_restaurant_boissons(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
     boisson_service = BoissonService(db)
     return boisson_service.get_restaurant_boissons(restaurant_id)
 
@@ -758,17 +918,16 @@ def get_restaurant_boissons(
     responses={
         200: {"description": "Boisson trouvée."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Boisson introuvable."}
-    }
+        404: {"description": "Boisson introuvable."},
+    },
 )
-def get_boisson(
-    boisson_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_boisson(boisson_id: uuid.UUID, db: Session = Depends(get_db)):
     boisson_service = BoissonService(db)
     boisson = boisson_service.get_boisson(boisson_id)
     if not boisson:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Boisson not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Boisson not found"
+        )
     return boisson
 
 
@@ -787,20 +946,22 @@ def get_boisson(
         400: {"description": "Données invalides."},
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit."},
-        404: {"description": "Boisson introuvable."}
-    }
+        404: {"description": "Boisson introuvable."},
+    },
 )
 def update_boisson(
     boisson_id: uuid.UUID,
     boisson_data: BoissonUpdate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     boisson_service = BoissonService(db)
     try:
         updated_boisson = boisson_service.update_boisson(boisson_id, boisson_data)
         if not updated_boisson:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Boisson not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Boisson not found"
+            )
         return updated_boisson
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -821,14 +982,14 @@ def update_boisson(
     responses={
         201: {"description": "Table créée avec succès."},
         400: {"description": "Données invalides ou numéro déjà utilisé."},
-        401: {"description": "Token JWT absent ou invalide."}
-    }
+        401: {"description": "Token JWT absent ou invalide."},
+    },
 )
 def create_table(
     restaurant_id: uuid.UUID,
     table_data: TableCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     table_service = TableService(db)
     try:
@@ -847,14 +1008,9 @@ def create_table(
 
     Cette donnée est utilisée pour gérer le plan de salle et la gestion des commandes en cours.
     """,
-    responses={
-        200: {"description": "Tables récupérées avec succès."}
-    }
+    responses={200: {"description": "Tables récupérées avec succès."}},
 )
-def get_restaurant_tables(
-    restaurant_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_restaurant_tables(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
     table_service = TableService(db)
     return table_service.get_restaurant_tables(restaurant_id)
 
@@ -869,14 +1025,9 @@ def get_restaurant_tables(
 
     Cette route est essentielle pour la gestion du flux de clientèle dans les restaurants et le service de commande.
     """,
-    responses={
-        200: {"description": "Tables libres récupérées avec succès."}
-    }
+    responses={200: {"description": "Tables libres récupérées avec succès."}},
 )
-def get_free_tables(
-    restaurant_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_free_tables(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
     table_service = TableService(db)
     return table_service.get_free_tables(restaurant_id)
 
@@ -894,17 +1045,16 @@ def get_free_tables(
     responses={
         200: {"description": "Table trouvée."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Table introuvable."}
-    }
+        404: {"description": "Table introuvable."},
+    },
 )
-def get_table(
-    table_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
+def get_table(table_id: uuid.UUID, db: Session = Depends(get_db)):
     table_service = TableService(db)
     table = table_service.get_table(table_id)
     if not table:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Table not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Table not found"
+        )
     return table
 
 
@@ -923,48 +1073,54 @@ def get_table(
         400: {"description": "Données invalides."},
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit."},
-        404: {"description": "Table introuvable."}
-    }
+        404: {"description": "Table introuvable."},
+    },
 )
 def update_table(
     table_id: uuid.UUID,
     table_data: TableUpdate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     table_service = TableService(db)
     try:
         updated_table = table_service.update_table(table_id, table_data)
         if not updated_table:
-            raise HTTPException(status_code.HTTP_404_NOT_FOUND, detail="Table not found")
+            raise HTTPException(
+                status_code.HTTP_404_NOT_FOUND, detail="Table not found"
+            )
         return updated_table
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-# Commandes
+# Commandes (LÉGACY — déprécié, utilisez ROS Orders)
+_LEGACY_DEPRECATED_NOTICE = (
+    "⚠️ Modèle Commande historique déprécié. Utilisez plutôt le moteur ROS : "
+    "/v1/ros/* (service_sessions → ros_orders + production_tickets + ros_invoices)."
+)
+
+
 @router.post(
     "/{restaurant_id}/commandes",
     response_model=CommandeResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-orders"],
-    summary="Créer une commande",
-    description="""
-    Crée une commande pour un restaurant donné et, le cas échéant, une table précise.
-
-    Cette route est au cœur du flux de commande : elle initialise le panier, le statut, le total et les éventuelles données métier associées.
-    """,
+    summary="[DÉPRÉCIÉ] Créer une commande",
+    description=_LEGACY_DEPRECATED_NOTICE,
     responses={
         201: {"description": "Commande créée avec succès."},
         400: {"description": "Données invalides ou logique de commande non respectée."},
-        401: {"description": "Token JWT absent ou invalide."}
-    }
+        401: {"description": "Token JWT absent ou invalide."},
+    },
+    deprecated=True,
 )
 def create_commande(
     restaurant_id: uuid.UUID,
     commande_data: CommandeCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+    _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
     try:
@@ -977,21 +1133,17 @@ def create_commande(
     "/{restaurant_id}/commandes",
     response_model=List[CommandeResponse],
     tags=["restaurant-orders"],
-    summary="Historique des commandes d’un restaurant",
-    description="""
-    Retourne les commandes liées à un restaurant, avec pagination optionnelle.
-
-    Ce point d’entrée sert à consulter le journal des commandes et la progression du service en salle.
-    """,
-    responses={
-        200: {"description": "Commandes récupérées avec succès."}
-    }
+    summary="[DÉPRÉCIÉ] Historique des commandes d’un restaurant",
+    description=_LEGACY_DEPRECATED_NOTICE,
+    responses={200: {"description": "Commandes récupérées avec succès."}},
+    deprecated=True,
 )
 def get_restaurant_commandes(
     restaurant_id: uuid.UUID,
     skip: int = 0,
     limit: int = 100,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
     return commande_service.get_restaurant_commandes(restaurant_id, skip, limit)
@@ -1001,21 +1153,19 @@ def get_restaurant_commandes(
     "/{restaurant_id}/commandes/active",
     response_model=List[CommandeResponse],
     tags=["restaurant-orders"],
-    summary="Commandes actives d’un restaurant",
-    description="""
-    Retourne les commandes actuellement actives dans un restaurant.
-
-    Cette route sert à suivre les commandes en cours de préparation ou de service afin d’optimiser la gestion du flux de salle.
-    """,
+    summary="[DÉPRÉCIÉ] Commandes actives d’un restaurant",
+    description=_LEGACY_DEPRECATED_NOTICE,
     responses={
         200: {"description": "Commandes actives récupérées avec succès."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Restaurant introuvable."}
-    }
+        404: {"description": "Restaurant introuvable."},
+    },
+    deprecated=True,
 )
 def get_active_commandes(
     restaurant_id: uuid.UUID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
     return commande_service.get_active_commandes(restaurant_id)
@@ -1025,26 +1175,26 @@ def get_active_commandes(
     "/commandes/{commande_id}",
     response_model=CommandeResponse,
     tags=["restaurant-orders"],
-    summary="Détails d’une commande",
-    description="""
-    Retourne les informations complètes d’une commande donnée.
-
-    Cette route permet de vérifier le statut, le contexte de table ou restaurant, ainsi que le détail des éléments saisis dans la commande.
-    """,
+    summary="[DÉPRÉCIÉ] Détails d’une commande",
+    description=_LEGACY_DEPRECATED_NOTICE,
     responses={
         200: {"description": "Commande trouvée."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Commande introuvable."}
-    }
+        404: {"description": "Commande introuvable."},
+    },
+    deprecated=True,
 )
 def get_commande(
     commande_id: uuid.UUID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
     commande = commande_service.get_commande(commande_id)
     if not commande:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Commande not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Commande not found"
+        )
     return commande
 
 
@@ -1052,31 +1202,31 @@ def get_commande(
     "/commandes/{commande_id}",
     response_model=CommandeResponse,
     tags=["restaurant-orders"],
-    summary="Mettre à jour une commande",
-    description="""
-    Modifie une commande existante.
-
-    Cette route sert à changer le statut de la commande, les informations associées ou le suivi du service.
-    """,
+    summary="[DÉPRÉCIÉ] Mettre à jour une commande",
+    description=_LEGACY_DEPRECATED_NOTICE,
     responses={
         200: {"description": "Commande mise à jour."},
         400: {"description": "Données invalides."},
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit."},
-        404: {"description": "Commande introuvable."}
-    }
+        404: {"description": "Commande introuvable."},
+    },
+    deprecated=True,
 )
 def update_commande(
     commande_id: uuid.UUID,
     commande_data: CommandeUpdate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+    _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
     try:
         updated_commande = commande_service.update_commande(commande_id, commande_data)
         if not updated_commande:
-            raise HTTPException(status_code.HTTP_404_NOT_FOUND, detail="Commande not found")
+            raise HTTPException(
+                status_code.HTTP_404_NOT_FOUND, detail="Commande not found"
+            )
         return updated_commande
     except ValueError as e:
         raise HTTPException(status_code.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -1087,24 +1237,22 @@ def update_commande(
     response_model=CommandeItemResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-orders"],
-    summary="Ajouter un item à une commande",
-    description="""
-    Ajoute un produit ou un élément à une commande existante.
-
-    Cette route est au cœur du panier de commande : elle enregistre un plat, une boisson ou un article associé à la commande.
-    """,
+    summary="[DÉPRÉCIÉ] Ajouter un item à une commande",
+    description=_LEGACY_DEPRECATED_NOTICE,
     responses={
         201: {"description": "Item ajouté avec succès."},
         400: {"description": "Données invalides ou item non compatible."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Commande introuvable."}
-    }
+        404: {"description": "Commande introuvable."},
+    },
+    deprecated=True,
 )
 def add_commande_item(
     commande_id: uuid.UUID,
     item_data: CommandeItemCreate,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+    _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
     try:
@@ -1117,21 +1265,113 @@ def add_commande_item(
     "/commandes/{commande_id}/items",
     response_model=List[CommandeItemResponse],
     tags=["restaurant-orders"],
-    summary="Lister les items d’une commande",
-    description="""
-    Retourne la liste détaillée des éléments constituant une commande.
-
-    Cette route permet de retrouver le contenu exact de la commande, son montant partiel et l’état des produits sélectionnés.
-    """,
+    summary="[DÉPRÉCIÉ] Lister les items d’une commande",
+    description=_LEGACY_DEPRECATED_NOTICE,
     responses={
         200: {"description": "Items de commande récupérés avec succès."},
         401: {"description": "Token JWT absent ou invalide."},
-        404: {"description": "Commande introuvable."}
-    }
+        404: {"description": "Commande introuvable."},
+    },
+    deprecated=True,
 )
 def get_commande_items(
     commande_id: uuid.UUID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
     return commande_service.get_commande_items(commande_id)
+
+
+# Refunds (flux complet)
+@router.post(
+    "/commandes/{commande_id}/refunds",
+    response_model=CommandeRefundResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["restaurant-orders-refunds"],
+    summary="Demander un remboursement (total ou partiel)",
+    description="""
+    Dépose une demande de remboursement sur une commande payée.
+
+    Le montant ne peut excéder `commande.total - commande.refunded_amount`.
+    Une fois approuvée, le stock des composants des plats est restitué.
+    """,
+    responses={
+        201: {"description": "Demande de remboursement créée."},
+        400: {"description": "Montant invalide ou commande non remboursable."},
+        404: {"description": "Commande introuvable."},
+    },
+)
+def request_refund(
+    commande_id: uuid.UUID,
+    refund_data: CommandeRefundCreate,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    service = CommandeService(db)
+    try:
+        return service.request_refund(
+            commande_id,
+            refund_data,
+            initiated_by=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.get(
+    "/commandes/{commande_id}/refunds",
+    response_model=List[CommandeRefundResponse],
+    tags=["restaurant-orders-refunds"],
+    summary="Historique des remboursements d’une commande",
+)
+def get_commande_refunds(commande_id: uuid.UUID, db: Session = Depends(get_db)):
+    service = CommandeService(db)
+    return service.get_refunds(commande_id)
+
+
+@router.post(
+    "/commandes/{commande_id}/refunds/{refund_id}/approve",
+    response_model=CommandeRefundResponse,
+    tags=["restaurant-orders-refunds"],
+    summary="Approuver un remboursement (manager/admin)",
+    description="""
+    Valide une demande de remboursement. Effectue :
+    - la mise à jour de `commande.refunded_amount` et `refund_status` ;
+    - le restockage des composants consommés par les articles concernés ;
+    - l’horodatage et l’audit `processed_by`.
+    """,
+)
+def approve_refund(
+    commande_id: uuid.UUID,
+    refund_id: uuid.UUID,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    service = CommandeService(db)
+    try:
+        return service.approve_refund(refund_id, processed_by=current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post(
+    "/commandes/{commande_id}/refunds/{refund_id}/reject",
+    response_model=CommandeRefundResponse,
+    tags=["restaurant-orders-refunds"],
+    summary="Rejeter une demande de remboursement",
+)
+def reject_refund(
+    commande_id: uuid.UUID,
+    refund_id: uuid.UUID,
+    reason: str = "",
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    service = CommandeService(db)
+    try:
+        return service.reject_refund(
+            refund_id, reason=reason, processed_by=current_user.id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

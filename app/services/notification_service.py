@@ -8,7 +8,7 @@ logger = get_logger(__name__)
 
 class NotificationTemplateManager:
     """Gestionnaire de templates de notifications"""
-    
+
     # Templates prédéfinis pour différents types de notifications
     _templates = {
         "commande_confirme": {
@@ -27,11 +27,11 @@ Détails de la commande:
 Merci pour votre commande!
 
 L'équipe {restaurant_name}
-                """.strip()
+                """.strip(),
             },
             "sms": {
                 "subject": "",  # SMS n'a pas de sujet
-                "message": "Commande #{commande_id} confirmée chez {restaurant_name}. Total: {total} {currency}. Merci!"
+                "message": "Commande #{commande_id} confirmée chez {restaurant_name}. Total: {total} {currency}. Merci!",
             },
             "whatsapp": {
                 "subject": "",  # WhatsApp n'a pas de sujet
@@ -43,8 +43,8 @@ Commande: #{commande_id}
 Total: {total} {currency}
 
 Merci pour votre commande! 🙏
-                """.strip()
-            }
+                """.strip(),
+            },
         },
         "commande_prete": {
             "email": {
@@ -57,11 +57,11 @@ Votre commande #{commande_id} est prête à être récupérée.
 Veuillez vous présenter à l'accueil.
 
 L'équipe {restaurant_name}
-                """.strip()
+                """.strip(),
             },
             "sms": {
                 "subject": "",
-                "message": "Commande #{commande_id} prête chez {restaurant_name}. Venez la récupérer!"
+                "message": "Commande #{commande_id} prête chez {restaurant_name}. Venez la récupérer!",
             },
             "whatsapp": {
                 "subject": "",
@@ -72,8 +72,8 @@ Commande: #{commande_id}
 Restaurant: {restaurant_name}
 
 Venez la récupérer! 🏃‍♂️
-                """.strip()
-            }
+                """.strip(),
+            },
         },
         "payment_confirme": {
             "email": {
@@ -91,11 +91,11 @@ Détails:
 Merci!
 
 L'équipe {restaurant_name}
-                """.strip()
+                """.strip(),
             },
             "sms": {
                 "subject": "",
-                "message": "Paiement de {amount} {currency} confirmé pour commande #{commande_id}. Méthode: {payment_method}"
+                "message": "Paiement de {amount} {currency} confirmé pour commande #{commande_id}. Méthode: {payment_method}",
             },
             "whatsapp": {
                 "subject": "",
@@ -107,8 +107,8 @@ Commande: #{commande_id}
 Méthode: {payment_method}
 
 Merci! 🎉
-                """.strip()
-            }
+                """.strip(),
+            },
         },
         "inscription": {
             "email": {
@@ -124,11 +124,11 @@ Restaurant: {restaurant_name}
 Connectez-vous pour commencer à utiliser nos services.
 
 L'équipe Marinade
-                """.strip()
+                """.strip(),
             },
             "sms": {
                 "subject": "",
-                "message": "Bienvenue sur Marinade! Votre compte pour {restaurant_name} est créé. Connectez-vous pour commencer."
+                "message": "Bienvenue sur Marinade! Votre compte pour {restaurant_name} est créé. Connectez-vous pour commencer.",
             },
             "whatsapp": {
                 "subject": "",
@@ -139,20 +139,20 @@ Votre compte est créé!
 Restaurant: {restaurant_name}
 
 Connectez-vous pour commencer! 🚀
-                """.strip()
-            }
-        }
+                """.strip(),
+            },
+        },
     }
-    
+
     @classmethod
     def get_template(cls, template_type: str, channel: str) -> Optional[Dict[str, str]]:
         """
         Récupère un template pour un type et canal spécifiques
-        
+
         Args:
             template_type: Type de template (commande_confirme, payment_confirme, etc.)
             channel: Canal de notification (email, sms, whatsapp)
-            
+
         Returns:
             Dict avec subject et message, ou None si non trouvé
         """
@@ -160,12 +160,14 @@ Connectez-vous pour commencer! 🚀
         if not template:
             logger.warning(f"Template not found: {template_type} for channel {channel}")
         return template
-    
+
     @classmethod
-    def register_template(cls, template_type: str, channel: str, subject: str, message: str) -> None:
+    def register_template(
+        cls, template_type: str, channel: str, subject: str, message: str
+    ) -> None:
         """
         Enregistre un nouveau template personnalisé
-        
+
         Args:
             template_type: Type de template
             channel: Canal de notification
@@ -174,13 +176,15 @@ Connectez-vous pour commencer! 🚀
         """
         if template_type not in cls._templates:
             cls._templates[template_type] = {}
-        
+
         cls._templates[template_type][channel] = {
             "subject": subject,
-            "message": message
+            "message": message,
         }
-        logger.info(f"Registered custom template: {template_type} for channel {channel}")
-    
+        logger.info(
+            f"Registered custom template: {template_type} for channel {channel}"
+        )
+
     @classmethod
     def get_available_templates(cls) -> List[str]:
         """Retourne la liste des types de templates disponibles"""
@@ -189,12 +193,14 @@ Connectez-vous pour commencer! 🚀
 
 class NotificationService:
     """Service orchestrateur pour les notifications"""
-    
-    def __init__(self, db: Optional[Session] = None, notification_config: Dict[str, Any] = None):
+
+    def __init__(
+        self, db: Optional[Session] = None, notification_config: Dict[str, Any] = None
+    ):
         self.db = db
         self.notification_config = notification_config or {}
         self.template_manager = NotificationTemplateManager()
-    
+
     def send_notification(
         self,
         channel_type: str,
@@ -203,11 +209,11 @@ class NotificationService:
         subject: str = None,
         message: str = None,
         template_data: Dict[str, Any] = None,
-        channel_config: Dict[str, Any] = None
+        channel_config: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Envoie une notification via le canal spécifié
-        
+
         Args:
             channel_type: Type de canal (email, sms, whatsapp)
             recipient: Destinataire
@@ -216,14 +222,16 @@ class NotificationService:
             message: Message personnalisé (si pas de template)
             template_data: Données pour le template
             channel_config: Configuration spécifique au canal
-            
+
         Returns:
             Résultat de l'envoi
         """
         try:
             # Récupérer ou créer le template
             if template_type:
-                template = self.template_manager.get_template(template_type, channel_type)
+                template = self.template_manager.get_template(
+                    template_type, channel_type
+                )
                 if template:
                     final_subject = template["subject"]
                     final_message = template["message"]
@@ -233,37 +241,40 @@ class NotificationService:
             else:
                 final_subject = subject or ""
                 final_message = message or ""
-            
+
             # Créer le canal de notification
-            config = {**self.notification_config.get(channel_type, {}), **(channel_config or {})}
-            notification_channel = NotificationFactory.create_notification_channel(channel_type, config)
-            
+            config = {
+                **self.notification_config.get(channel_type, {}),
+                **(channel_config or {}),
+            }
+            notification_channel = NotificationFactory.create_notification_channel(
+                channel_type, config
+            )
+
             # Envoyer la notification
             result = notification_channel.send_notification(
                 recipient=recipient,
                 subject=final_subject,
                 message=final_message,
-                template_data=template_data
+                template_data=template_data,
             )
-            
-            logger.info(f"Notification sent: {channel_type} to {recipient}, success: {result.get('success')}")
+
+            logger.info(
+                f"Notification sent: {channel_type} to {recipient}, success: {result.get('success')}"
+            )
             return result
-            
+
         except ValueError as e:
             logger.error(f"Notification channel error: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e),
-                "channel": channel_type
-            }
+            return {"success": False, "error": str(e), "channel": channel_type}
         except Exception as e:
             logger.error(f"Notification sending error: {str(e)}")
             return {
                 "success": False,
                 "error": "Notification sending failed",
-                "channel": channel_type
+                "channel": channel_type,
             }
-    
+
     def send_bulk_notification(
         self,
         channel_type: str,
@@ -272,11 +283,11 @@ class NotificationService:
         subject: str = None,
         message: str = None,
         template_data: Dict[str, Any] = None,
-        channel_config: Dict[str, Any] = None
+        channel_config: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Envoie une notification en masse via le canal spécifié
-        
+
         Args:
             channel_type: Type de canal
             recipients: Liste des destinataires
@@ -285,14 +296,16 @@ class NotificationService:
             message: Message personnalisé (si pas de template)
             template_data: Données pour le template
             channel_config: Configuration spécifique au canal
-            
+
         Returns:
             Résultat de l'envoi en masse
         """
         try:
             # Récupérer ou créer le template
             if template_type:
-                template = self.template_manager.get_template(template_type, channel_type)
+                template = self.template_manager.get_template(
+                    template_type, channel_type
+                )
                 if template:
                     final_subject = template["subject"]
                     final_message = template["message"]
@@ -302,30 +315,33 @@ class NotificationService:
             else:
                 final_subject = subject or ""
                 final_message = message or ""
-            
+
             # Créer le canal de notification
-            config = {**self.notification_config.get(channel_type, {}), **(channel_config or {})}
-            notification_channel = NotificationFactory.create_notification_channel(channel_type, config)
-            
+            config = {
+                **self.notification_config.get(channel_type, {}),
+                **(channel_config or {}),
+            }
+            notification_channel = NotificationFactory.create_notification_channel(
+                channel_type, config
+            )
+
             # Envoyer la notification en masse
             result = notification_channel.send_bulk_notification(
                 recipients=recipients,
                 subject=final_subject,
                 message=final_message,
-                template_data=template_data
+                template_data=template_data,
             )
-            
-            logger.info(f"Bulk notification sent: {channel_type} to {len(recipients)} recipients, success: {result.get('success')}")
+
+            logger.info(
+                f"Bulk notification sent: {channel_type} to {len(recipients)} recipients, success: {result.get('success')}"
+            )
             return result
-            
+
         except Exception as e:
             logger.error(f"Bulk notification sending error: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e),
-                "channel": channel_type
-            }
-    
+            return {"success": False, "error": str(e), "channel": channel_type}
+
     def send_multi_channel_notification(
         self,
         channels: List[str],
@@ -333,11 +349,11 @@ class NotificationService:
         template_type: str = None,
         subject: str = None,
         message: str = None,
-        template_data: Dict[str, Any] = None
+        template_data: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Envoie une notification via plusieurs canaux simultanément
-        
+
         Args:
             channels: Liste des canaux à utiliser
             recipient: Destinataire
@@ -345,14 +361,14 @@ class NotificationService:
             subject: Sujet personnalisé (si pas de template)
             message: Message personnalisé (si pas de template)
             template_data: Données pour le template
-            
+
         Returns:
             Résultat combiné de tous les canaux
         """
         results = {}
         successful = 0
         failed = 0
-        
+
         for channel in channels:
             result = self.send_notification(
                 channel_type=channel,
@@ -360,27 +376,27 @@ class NotificationService:
                 template_type=template_type,
                 subject=subject,
                 message=message,
-                template_data=template_data
+                template_data=template_data,
             )
             results[channel] = result
-            
+
             if result.get("success"):
                 successful += 1
             else:
                 failed += 1
-        
+
         return {
             "success": failed == 0,
             "channels_used": channels,
             "successful": successful,
             "failed": failed,
-            "results": results
+            "results": results,
         }
-    
+
     def get_supported_channels(self) -> List[str]:
         """Retourne la liste des canaux supportés"""
         return NotificationFactory.get_supported_channels()
-    
+
     def get_available_templates(self) -> List[str]:
         """Retourne la liste des templates disponibles"""
         return self.template_manager.get_available_templates()

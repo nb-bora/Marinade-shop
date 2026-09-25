@@ -2,6 +2,7 @@
 
 Ces tests sont purement unitaires : ils ne touchent pas la base de données.
 """
+
 import hashlib
 import hmac
 import uuid
@@ -33,42 +34,58 @@ class TestWebhookSignature:
     """Vérification HMAC de la signature des webhooks."""
 
     def test_valid_signature_is_accepted(self, monkeypatch):
-        monkeypatch.setattr(settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False)
+        monkeypatch.setattr(
+            settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False
+        )
         body = b'{"vendor_reference":"MRD-1"}'
         _service().verify_webhook(body, _sign(body))
 
     def test_sha256_prefix_is_accepted(self, monkeypatch):
-        monkeypatch.setattr(settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False)
+        monkeypatch.setattr(
+            settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False
+        )
         body = b'{"vendor_reference":"MRD-2"}'
         _service().verify_webhook(body, "sha256=" + _sign(body))
 
     def test_wrong_secret_is_rejected(self, monkeypatch):
-        monkeypatch.setattr(settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False)
+        monkeypatch.setattr(
+            settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False
+        )
         with pytest.raises(HTTPException) as exc:
             _service().verify_webhook(b"corps", _sign(b"corps", "autre-secret"))
         assert exc.value.status_code == 401
 
     def test_tampered_body_is_rejected(self, monkeypatch):
-        monkeypatch.setattr(settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False)
+        monkeypatch.setattr(
+            settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False
+        )
         with pytest.raises(HTTPException) as exc:
             _service().verify_webhook(b"corps-modifie", _sign(b"corps-originel"))
         assert exc.value.status_code == 401
 
     def test_missing_signature_is_rejected(self, monkeypatch):
-        monkeypatch.setattr(settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False)
+        monkeypatch.setattr(
+            settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False
+        )
         with pytest.raises(HTTPException) as exc:
             _service().verify_webhook(b"corps", None)
         assert exc.value.status_code == 401
 
     def test_missing_secret_is_rejected(self, monkeypatch):
-        monkeypatch.setattr(settings, "EASYTRANSACT_WEBHOOK_SECRET", None, raising=False)
+        monkeypatch.setattr(
+            settings, "EASYTRANSACT_WEBHOOK_SECRET", None, raising=False
+        )
         with pytest.raises(HTTPException) as exc:
             _service().verify_webhook(b"corps", _sign(b"corps"))
         assert exc.value.status_code == 401
 
     def test_unsupported_algorithm_fails_closed(self, monkeypatch):
-        monkeypatch.setattr(settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False)
-        monkeypatch.setattr(settings, "EASYTRANSACT_WEBHOOK_SIGNATURE_ALGORITHM", "md5", raising=False)
+        monkeypatch.setattr(
+            settings, "EASYTRANSACT_WEBHOOK_SECRET", SECRET, raising=False
+        )
+        monkeypatch.setattr(
+            settings, "EASYTRANSACT_WEBHOOK_SIGNATURE_ALGORITHM", "md5", raising=False
+        )
         with pytest.raises(HTTPException) as exc:
             _service().verify_webhook(b"corps", _sign(b"corps"))
         assert exc.value.status_code == 503
@@ -182,7 +199,9 @@ class TestOperatorPrefixResolution:
             normalize_cameroon_mobile("+33123456789")
 
     def test_default_operators_do_not_share_prefixes(self):
-        prefixes = [prefix for operator in MOBILE_OPERATORS for prefix in operator.prefixes]
+        prefixes = [
+            prefix for operator in MOBILE_OPERATORS for prefix in operator.prefixes
+        ]
         # Un préfixe partagé rendrait la résolution dépendante de l'ordre de
         # déclaration des opérateurs.
         assert len(set(prefixes)) == len(prefixes)

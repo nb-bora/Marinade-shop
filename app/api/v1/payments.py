@@ -6,7 +6,12 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user, require_payment_intent_access, require_restaurant_access, set_db_context
+from app.api.dependencies import (
+    get_current_user,
+    require_payment_intent_access,
+    require_restaurant_access,
+    set_db_context,
+)
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.payment import PaymentIntent
@@ -48,7 +53,11 @@ def create_checkout(
     try:
         require_restaurant_access(data.restaurant_id, current_user, db)
         intent = EasyTransactPaymentService(db).create_checkout(data)
-        response.status_code = status.HTTP_201_CREATED if intent.status == "initiated" else status.HTTP_200_OK
+        response.status_code = (
+            status.HTTP_201_CREATED
+            if intent.status == "initiated"
+            else status.HTTP_200_OK
+        )
         return intent
     except HTTPException:
         raise
@@ -77,7 +86,9 @@ def get_payment_status(
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    intent: PaymentIntent = require_payment_intent_access(payment_intent_id, current_user, db)
+    intent: PaymentIntent = require_payment_intent_access(
+        payment_intent_id, current_user, db
+    )
     return intent
 
 
@@ -99,7 +110,9 @@ async def webhook(
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
     signature = request.headers.get(settings.EASYTRANSACT_WEBHOOK_SIGNATURE_HEADER)
-    intent, duplicate = EasyTransactPaymentService(db).process_webhook(payload, raw_body, signature)
+    intent, duplicate = EasyTransactPaymentService(db).process_webhook(
+        payload, raw_body, signature
+    )
     if intent.restaurant_id != restaurant_id:
         raise HTTPException(status_code=404, detail="Payment intent not found")
     return {"accepted": True, "duplicate": duplicate, "status": intent.status}
@@ -109,4 +122,6 @@ async def webhook(
 # call the tenant-specific URL so the database can establish RLS context.
 @router.post("/webhook", response_model=EasyTransactWebhookResponse)
 async def unscoped_webhook(request: Request):
-    raise HTTPException(status_code=400, detail="A tenant-specific webhook URL is required")
+    raise HTTPException(
+        status_code=400, detail="A tenant-specific webhook URL is required"
+    )

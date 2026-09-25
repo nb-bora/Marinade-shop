@@ -195,6 +195,7 @@ class PlatBase(BaseModel):
 
 class PlatCreate(PlatBase):
     category_id: Optional[uuid.UUID] = None
+    composant_ids: List[uuid.UUID] = []
 
 
 class PlatUpdate(BaseModel):
@@ -207,6 +208,8 @@ class PlatUpdate(BaseModel):
     photo_url: Optional[str] = None
     temps_preparation: Optional[int] = Field(None, ge=0)
     attributs_jsonb: Optional[dict] = None
+    category_id: Optional[uuid.UUID] = None
+    composant_ids: Optional[List[uuid.UUID]] = Field(None, min_length=0)
 
 
 class PlatResponse(PlatBase):
@@ -215,6 +218,31 @@ class PlatResponse(PlatBase):
     category_id: Optional[uuid.UUID]
     created_at: datetime
     updated_at: datetime
+    composants: List[ComposantResponse] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PlatComposantBase(BaseModel):
+    plat_id: uuid.UUID
+    composant_id: uuid.UUID
+    quantite: Decimal = Field(default=1, gt=0)
+    obligatoire: bool = True
+
+
+class PlatComposantCreate(PlatComposantBase):
+    pass
+
+
+class PlatComposantUpdate(BaseModel):
+    quantite: Optional[Decimal] = Field(None, gt=0)
+    obligatoire: Optional[bool] = None
+
+
+class PlatComposantResponse(PlatComposantBase):
+    id: uuid.UUID
+    restaurant_id: uuid.UUID
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -328,6 +356,33 @@ class CommandeUpdate(BaseModel):
     table_id: Optional[uuid.UUID] = None
     statut: Optional[str] = Field(None, max_length=20)
     metadata_jsonb: Optional[dict] = None
+    total: Optional[Decimal] = Field(None, ge=0)
+    taux_service: Optional[Decimal] = Field(None, ge=0, le=100)
+    remboursement_montant: Optional[Decimal] = Field(None, ge=0)
+    remboursement_raison: Optional[str] = Field(None, max_length=500)
+    remboursement_statut: Optional[str] = Field(None, max_length=20)
+    remboursement_effectue_par: Optional[uuid.UUID] = None
+
+
+class CommandeRefundCreate(BaseModel):
+    commande_id: uuid.UUID
+    montant: Decimal = Field(..., gt=0)
+    raison: str = Field(..., min_length=1, max_length=500)
+    item_ids: Optional[List[uuid.UUID]] = Field(None, min_length=1)
+
+
+class CommandeRefundResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    commande_id: uuid.UUID
+    restaurant_id: uuid.UUID
+    montant: Decimal
+    raison: str
+    statut: str
+    effectue_par_id: uuid.UUID
+    item_ids: List[uuid.UUID] = []
+    created_at: datetime
+    updated_at: datetime
 
 
 class CommandeResponse(CommandeBase):
@@ -336,5 +391,10 @@ class CommandeResponse(CommandeBase):
     created_at: datetime
     updated_at: datetime
     items: List[CommandeItemResponse] = []
+    remboursement_montant: Optional[Decimal] = None
+    remboursement_raison: Optional[str] = None
+    remboursement_statut: Optional[str] = None
+    remboursement_effectue_par: Optional[uuid.UUID] = None
+    remboursements: List[CommandeRefundResponse] = []
 
     model_config = ConfigDict(from_attributes=True)

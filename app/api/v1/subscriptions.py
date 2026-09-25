@@ -12,7 +12,7 @@ from app.schemas.subscription import (
     SubscriptionUpdate,
     DailyBalanceResponse,
     DailyBalanceCreate,
-    DailyBalanceUpdate
+    DailyBalanceUpdate,
 )
 from app.api.dependencies import get_current_user, require_admin
 import uuid
@@ -32,9 +32,7 @@ router = APIRouter(prefix="/subscriptions")
     Chaque tier définit une limite quotidienne et des prix associés selon la durée d’abonnement.
     Cette route est généralement utilisée pour présenter les options aux clients avant leur souscription.
     """,
-    responses={
-        200: {"description": "Offres récupérées avec succès."}
-    }
+    responses={200: {"description": "Offres récupérées avec succès."}},
 )
 def get_tiers(db: Session = Depends(get_db)):
     subscription_service = SubscriptionService(db)
@@ -53,14 +51,16 @@ def get_tiers(db: Session = Depends(get_db)):
     """,
     responses={
         200: {"description": "Tier trouvé."},
-        404: {"description": "Tier introuvable."}
-    }
+        404: {"description": "Tier introuvable."},
+    },
 )
 def get_tier(tier_id: int, db: Session = Depends(get_db)):
     subscription_service = SubscriptionService(db)
     tier = subscription_service.get_tier(tier_id)
     if not tier:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tier not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Tier not found"
+        )
     return tier
 
 
@@ -79,13 +79,13 @@ def get_tier(tier_id: int, db: Session = Depends(get_db)):
         201: {"description": "Tier créé avec succès."},
         400: {"description": "Données invalides."},
         401: {"description": "Token absent ou invalide."},
-        403: {"description": "Accès interdit : droits insuffisants."}
-    }
+        403: {"description": "Accès interdit : droits insuffisants."},
+    },
 )
 def create_tier(
     tier_data: SubscriptionTierCreate,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
     try:
@@ -109,20 +109,24 @@ def create_tier(
         400: {"description": "Données invalides."},
         401: {"description": "Token absent ou invalide."},
         403: {"description": "Accès interdit : droits insuffisants."},
-        404: {"description": "Tier introuvable."}
-    }
+        404: {"description": "Tier introuvable."},
+    },
 )
 def update_tier(
     tier_id: int,
     tier_data: SubscriptionTierUpdate,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
     try:
-        tier = subscription_service.update_tier(tier_id, tier_data.model_dump(exclude_unset=True))
+        tier = subscription_service.update_tier(
+            tier_id, tier_data.model_dump(exclude_unset=True)
+        )
         if not tier:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tier not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Tier not found"
+            )
         return tier
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -142,17 +146,18 @@ def update_tier(
     responses={
         200: {"description": "Abonnement trouvé."},
         401: {"description": "Token absent ou invalide."},
-        404: {"description": "Aucun abonnement trouvé pour l’utilisateur."}
-    }
+        404: {"description": "Aucun abonnement trouvé pour l’utilisateur."},
+    },
 )
 def get_my_subscription(
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user), db: Session = Depends(get_db)
 ):
     subscription_service = SubscriptionService(db)
     subscription = subscription_service.get_user_subscription(current_user.id)
     if not subscription:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active subscription found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No active subscription found"
+        )
     return subscription
 
 
@@ -170,18 +175,20 @@ def get_my_subscription(
         200: {"description": "Abonnement trouvé."},
         401: {"description": "Token absent ou invalide."},
         403: {"description": "Accès interdit : droits insuffisants."},
-        404: {"description": "Abonnement introuvable."}
-    }
+        404: {"description": "Abonnement introuvable."},
+    },
 )
 def get_subscription(
     subscription_id: uuid.UUID,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
     subscription = subscription_service.get_subscription(subscription_id)
     if not subscription:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found"
+        )
     return subscription
 
 
@@ -200,13 +207,13 @@ def get_subscription(
         201: {"description": "Abonnement créé avec succès."},
         400: {"description": "Données invalides ou logique métier non respectée."},
         401: {"description": "Token absent ou invalide."},
-        403: {"description": "Accès interdit : droits insuffisants."}
-    }
+        403: {"description": "Accès interdit : droits insuffisants."},
+    },
 )
 def create_subscription(
     subscription_data: SubscriptionCreate,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
     try:
@@ -229,19 +236,23 @@ def create_subscription(
         200: {"description": "Statut mis à jour."},
         401: {"description": "Token absent ou invalide."},
         403: {"description": "Accès interdit : droits insuffisants."},
-        404: {"description": "Abonnement introuvable."}
-    }
+        404: {"description": "Abonnement introuvable."},
+    },
 )
 def update_subscription_status(
     subscription_id: uuid.UUID,
     status: str,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
-    subscription = subscription_service.update_subscription_status(subscription_id, status)
+    subscription = subscription_service.update_subscription_status(
+        subscription_id, status
+    )
     if not subscription:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found"
+        )
     return subscription
 
 
@@ -259,15 +270,16 @@ def update_subscription_status(
     responses={
         200: {"description": "Soldes récupérés avec succès."},
         401: {"description": "Token absent ou invalide."},
-        404: {"description": "Abonnement introuvable."}
-    }
+        404: {"description": "Abonnement introuvable."},
+    },
 )
 def get_subscription_balances(
     subscription_id: uuid.UUID,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     from app.repositories.subscription_repository import DailyBalanceRepository
+
     balance_repo = DailyBalanceRepository(db)
     return balance_repo.get_by_subscription_id(subscription_id)
 
@@ -285,18 +297,20 @@ def get_subscription_balances(
     responses={
         200: {"description": "Solde courant récupéré."},
         401: {"description": "Token absent ou invalide."},
-        404: {"description": "Aucun solde courant trouvé."}
-    }
+        404: {"description": "Aucun solde courant trouvé."},
+    },
 )
 def get_current_balance(
     subscription_id: uuid.UUID,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
     balance = subscription_service.get_current_balance(subscription_id)
     if not balance:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No current balance found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No current balance found"
+        )
     return balance
 
 
@@ -315,14 +329,14 @@ def get_current_balance(
         201: {"description": "Solde quotidien créé."},
         400: {"description": "Données invalides."},
         401: {"description": "Token absent ou invalide."},
-        403: {"description": "Accès interdit : droits insuffisants."}
-    }
+        403: {"description": "Accès interdit : droits insuffisants."},
+    },
 )
 def create_daily_balance(
     subscription_id: uuid.UUID,
     balance_data: DailyBalanceCreate,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
     balance_data.subscription_id = subscription_id
@@ -346,13 +360,13 @@ def create_daily_balance(
         200: {"description": "Réinitialisation effectuée."},
         400: {"description": "Erreur de logique métier ou abonnement invalide."},
         401: {"description": "Token absent ou invalide."},
-        403: {"description": "Accès interdit : droits insuffisants."}
-    }
+        403: {"description": "Accès interdit : droits insuffisants."},
+    },
 )
 def reset_daily_balance(
     subscription_id: uuid.UUID,
-    current_user = Depends(require_admin),
-    db: Session = Depends(get_db)
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
     try:

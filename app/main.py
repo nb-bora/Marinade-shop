@@ -2,7 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.api.router import router
-from app.api.exception_handlers import marinade_exception_handler, general_exception_handler
+from app.api.exception_handlers import (
+    marinade_exception_handler,
+    general_exception_handler,
+)
 from app.core.database import get_engine, Base
 from app.core.config import settings
 from app.utils.logging import get_logger
@@ -58,70 +61,70 @@ app = FastAPI(
     openapi_tags=[
         {
             "name": "authentication",
-            "description": "Endpoints d’authentification, création de compte, connexion, rafraîchissement des tokens et déconnexion."
+            "description": "Endpoints d’authentification, création de compte, connexion, rafraîchissement des tokens et déconnexion.",
         },
         {
             "name": "users",
-            "description": "Gestion des utilisateurs, profils, rôle admin/pos et opérations de maintenance sur les comptes."
+            "description": "Gestion des utilisateurs, profils, rôle admin/pos et opérations de maintenance sur les comptes.",
         },
         {
             "name": "subscriptions",
-            "description": "Gestion des souscriptions actives, statuts et suivi des comptes abonnés."
+            "description": "Gestion des souscriptions actives, statuts et suivi des comptes abonnés.",
         },
         {
             "name": "subscription-tiers",
-            "description": "Gestion des offres commerciales, prix, limites et niveaux d’abonnement disponibles."
+            "description": "Gestion des offres commerciales, prix, limites et niveaux d’abonnement disponibles.",
         },
         {
             "name": "subscription-balances",
-            "description": "Suivi des soldes quotidiens, historique de consommation et réinitialisation journalière."
+            "description": "Suivi des soldes quotidiens, historique de consommation et réinitialisation journalière.",
         },
         {
             "name": "transactions",
-            "description": "Historique des transactions et opérations de paiement liées aux abonnements et au point de vente."
+            "description": "Historique des transactions et opérations de paiement liées aux abonnements et au point de vente.",
         },
         {
             "name": "restaurants",
-            "description": "Gestion des établissements et de leur identité commerciale."
+            "description": "Gestion des établissements et de leur identité commerciale.",
         },
         {
             "name": "restaurant-menus",
-            "description": "Gestion des menus, organisation des cartes et structure commerciale du restaurant."
+            "description": "Gestion des menus, organisation des cartes et structure commerciale du restaurant.",
         },
         {
             "name": "restaurant-categories",
-            "description": "Gestion des catégories de menu pour organiser les plats et les boissons."
+            "description": "Gestion des catégories de menu pour organiser les plats et les boissons.",
         },
         {
             "name": "restaurant-plats",
-            "description": "Gestion des plats, prix, ingrédients, disponibilité et fiche produit."
+            "description": "Gestion des plats, prix, ingrédients, disponibilité et fiche produit.",
         },
         {
             "name": "restaurant-boissons",
-            "description": "Gestion de la carte boissons, prix, disponibilité et proposition commerciale."
+            "description": "Gestion de la carte boissons, prix, disponibilité et proposition commerciale.",
         },
         {
             "name": "restaurant-tables",
-            "description": "Gestion du plan de salle, occupation, disponibilité et positionnement des tables."
+            "description": "Gestion du plan de salle, occupation, disponibilité et positionnement des tables.",
         },
         {
             "name": "restaurant-orders",
-            "description": "Gestion des commandes clients, items, statut de commande et suivi de service."
+            "description": "Gestion des commandes clients, items, statut de commande et suivi de service.",
         },
         {
             "name": "restaurant-combinations",
-            "description": "Gestion des composants, combinaisons tarifées, suppléments et recommandations de repas selon la disponibilité."
+            "description": "Gestion des composants, combinaisons tarifées, suppléments et recommandations de repas selon la disponibilité.",
         },
         {
             "name": "restaurant-stock",
-            "description": "Consultation du stock physique et réservé, mouvements d'inventaire et disponibilité opérationnelle des composants."
+            "description": "Consultation du stock physique et réservé, mouvements d'inventaire et disponibilité opérationnelle des composants.",
         },
         {
             "name": "health",
-            "description": "Contrôle de santé de l’application et vérification du statut de disponibilité du service."
-        }
+            "description": "Contrôle de santé de l’application et vérification du statut de disponibilité du service.",
+        },
     ],
-    swagger_ui_parameters={"persistAuthorization": True}
+    swagger_ui_parameters={"persistAuthorization": True},
 )
 
 # Add exception handlers
@@ -150,14 +153,16 @@ app.include_router(router)
     Cette route est utile pour vérifier rapidement que l’API est démarrée et pour connaître la version active.
     """,
     tags=["health"],
-    responses={200: {"description": "Informations générales de l’API retournées avec succès."}}
+    responses={
+        200: {"description": "Informations générales de l’API retournées avec succès."}
+    },
 )
 def root():
     return {
         "message": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "docs": "/docs",
-        "environment": settings.ENVIRONMENT
+        "environment": settings.ENVIRONMENT,
     }
 
 
@@ -170,17 +175,20 @@ def root():
     Cette route est utilisée pour les probes de santé, le monitoring et les vérifications d’infra.
     """,
     tags=["health"],
-    responses={200: {"description": "L’application est disponible et répond correctement."}}
+    responses={
+        200: {"description": "L’application est disponible et répond correctement."}
+    },
 )
 def health_check():
     return {
         "status": "healthy",
         "app": settings.APP_NAME,
-        "version": settings.APP_VERSION
+        "version": settings.APP_VERSION,
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     logger.info(f"Starting server on {settings.HOST}:{settings.PORT}")
     uvicorn.run(app, host=settings.HOST, port=settings.PORT)

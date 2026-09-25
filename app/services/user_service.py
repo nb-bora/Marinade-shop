@@ -20,7 +20,9 @@ def validate_email(email: str) -> bool:
     local = email.split("@", 1)[0]
     if local.startswith(".") or local.endswith("."):
         return False
-    return re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email) is not None
+    return (
+        re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email) is not None
+    )
 
 
 class UserService:
@@ -37,7 +39,9 @@ class UserService:
     def get_all_users(self, skip: int = 0, limit: int = 100) -> List[User]:
         return self.user_repo.get_all(skip, limit)
 
-    def get_users_by_role(self, role: str, skip: int = 0, limit: int = 100) -> List[User]:
+    def get_users_by_role(
+        self, role: str, skip: int = 0, limit: int = 100
+    ) -> List[User]:
         return self.user_repo.get_by_role(role, skip, limit)
 
     def create_user(self, user_data: UserCreate) -> User:
@@ -54,9 +58,17 @@ class UserService:
         if not user:
             return None
         values = user_data.model_dump(exclude_unset=True)
-        if "email" in values and values["email"] != user.email and self.user_repo.email_exists(values["email"]):
+        if (
+            "email" in values
+            and values["email"] != user.email
+            and self.user_repo.email_exists(values["email"])
+        ):
             raise ValueError("Email already registered")
-        if "phone" in values and values["phone"] != user.phone and self.user_repo.phone_exists(values["phone"]):
+        if (
+            "phone" in values
+            and values["phone"] != user.phone
+            and self.user_repo.phone_exists(values["phone"])
+        ):
             raise ValueError("Phone number already registered")
         return self.user_repo.update(user, values)
 

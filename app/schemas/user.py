@@ -1,4 +1,4 @@
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from datetime import datetime
 import re
 import uuid
@@ -19,17 +19,26 @@ def normalize_phone(value: str) -> str:
     return normalized
 
 
+UserRole = Literal["admin", "pos", "restaurant", "manager", "chef", "waiter", "cashier"]
+
+
 class UserBase(BaseModel):
-    email: str = Field(..., min_length=3, max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+    email: str = Field(
+        ..., min_length=3, max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
+    )
     phone: str = Field(..., min_length=8, max_length=20)
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
-    role: Literal["admin", "pos", "restaurant"]
+    role: UserRole
 
     @field_validator("email")
     @classmethod
     def validate_email_format(cls, value: str) -> str:
-        if ".." in value or value.startswith(".") or value.split("@", 1)[0].endswith("."):
+        if (
+            ".." in value
+            or value.startswith(".")
+            or value.split("@", 1)[0].endswith(".")
+        ):
             raise ValueError("Invalid email format")
         return value.lower()
 
@@ -48,7 +57,7 @@ class UserUpdate(BaseModel):
     phone: Optional[str] = Field(None, min_length=8, max_length=20)
     first_name: Optional[str] = Field(None, min_length=1, max_length=100)
     last_name: Optional[str] = Field(None, min_length=1, max_length=100)
-    role: Optional[Literal["admin", "pos", "restaurant"]] = None
+    role: Optional[UserRole] = None
     is_active: Optional[bool] = None
 
     @field_validator("email")
@@ -56,7 +65,11 @@ class UserUpdate(BaseModel):
     def validate_email_format(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return value
-        if ".." in value or value.startswith(".") or value.split("@", 1)[0].endswith("."):
+        if (
+            ".." in value
+            or value.startswith(".")
+            or value.split("@", 1)[0].endswith(".")
+        ):
             raise ValueError("Invalid email format")
         return value.lower()
 
@@ -75,6 +88,9 @@ class UserResponse(BaseModel):
     last_name: str
     role: str
     is_active: bool
+    email_verified_at: Optional[datetime] = None
+    phone_verified_at: Optional[datetime] = None
+    two_factor_enabled: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -87,3 +103,39 @@ class UserLogin(BaseModel):
     @classmethod
     def normalize_email(cls, value: str) -> str:
         return value.strip().lower()
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=12, max_length=128)
+
+
+class EmailVerifyRequest(BaseModel):
+    token: str = Field(..., min_length=1)
+
+
+class PhoneVerifyRequest(BaseModel):
+    code: str = Field(..., min_length=4, max_length=10)
+
+
+class TwoFactorSetupResponse(BaseModel):
+    secret: str
+    qr_code_url: str
+    recovery_codes: List[str]
+
+
+class TwoFactorVerifyRequest(BaseModel):
+    token: str = Field(..., min_length=6, max_length=8)
+
+
+class TwoFactorRecoveryCodesResponse(BaseModel):
+    recovery_codes: List[str]

@@ -5,11 +5,25 @@ drop, migrate, or truncate a database and each test is rolled back. This is
 intentional: the default local/production database must never become a test
 fixture by accident.
 """
+
 import os
 import sys
 from pathlib import Path
 
 import pytest
+import httpx
+
+# Compatibility patch for Starlette TestClient with httpx >= 0.28
+_orig_httpx_init = httpx.Client.__init__
+
+
+def _patched_httpx_init(self, *args, **kwargs):
+    kwargs.pop("app", None)
+    _orig_httpx_init(self, *args, **kwargs)
+
+
+httpx.Client.__init__ = _patched_httpx_init
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
@@ -47,9 +61,9 @@ _Settings.model_config["env_file"] = None
 _config._settings = _Settings()
 
 
-
-
-def _set_rls_context(db: Session, *, user_id, tenant_id, is_platform_admin: bool) -> None:
+def _set_rls_context(
+    db: Session, *, user_id, tenant_id, is_platform_admin: bool
+) -> None:
     """Set transaction-local PostgreSQL variables used by the FORCE RLS policies."""
     db.execute(
         text("SELECT set_config('app.current_user_id', :user_id, true)"),
@@ -100,8 +114,12 @@ def postgres_test_session():
     transaction = connection.begin()
     db = Session(bind=connection, expire_on_commit=False)
     try:
-        current_revision = db.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        expected_revision = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini"))).get_current_head()
+        current_revision = db.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+        expected_revision = ScriptDirectory.from_config(
+            Config(str(ROOT / "alembic.ini"))
+        ).get_current_head()
         if current_revision != expected_revision:
             pytest.skip(
                 "PostgreSQL integration tests require Alembic head: "
@@ -132,7 +150,9 @@ def postgres_test_session():
             user_id=owner.id,
         )
         db.flush()
-        _set_rls_context(db, user_id=owner.id, tenant_id=restaurant.id, is_platform_admin=False)
+        _set_rls_context(
+            db, user_id=owner.id, tenant_id=restaurant.id, is_platform_admin=False
+        )
 
         yield {"db": db, "owner": owner, "restaurant": restaurant}
     finally:

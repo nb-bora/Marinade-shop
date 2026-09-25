@@ -5,6 +5,22 @@ class UserRole(str, Enum):
     ADMIN = "admin"
     POS = "pos"
     RESTAURANT = "restaurant"
+    WAITER = "waiter"
+    CASHIER = "cashier"
+    CHEF = "chef"
+    MANAGER = "manager"
+    DELIVERY = "delivery"
+
+
+class StaffRole(str, Enum):
+    WAITER = "waiter"
+    CASHIER = "cashier"
+    CHEF = "chef"
+    SOUS_CHEF = "sous_chef"
+    MANAGER = "manager"
+    DELIVERY = "delivery"
+    BARTENDER = "bartender"
+    HOST = "host"
 
 
 class SubscriptionStatus(str, Enum):
@@ -29,6 +45,32 @@ class CommandeStatut(str, Enum):
     PAYEE = "payee"
     PAYMENT_PENDING = "paiement_en_attente"
     PAYMENT_REVIEW = "paiement_a_verifier"
+
+
+class ReservationStatus(str, Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    CHECKED_IN = "checked_in"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    NO_SHOW = "no_show"
+
+
+class RefundStatus(str, Enum):
+    NONE = "none"
+    REQUESTED = "requested"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PARTIAL = "partial"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class VerificationStatus(str, Enum):
+    UNVERIFIED = "unverified"
+    PENDING = "pending"
+    VERIFIED = "verified"
+    EXPIRED = "expired"
 
 
 class PaymentStatus(str, Enum):

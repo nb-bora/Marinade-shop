@@ -9,12 +9,14 @@ import sys
 
 def test_app_imports():
     from app.main import app
+
     assert app is not None
     assert app.title == "Marinade API"
 
 
 def test_app_routes():
     from app.main import app
+
     routes = [route.path for route in app.routes]
     assert "" in routes
     assert "/health" in routes
@@ -23,6 +25,7 @@ def test_app_routes():
 
 def test_email_validation():
     from app.services.user_service import validate_email
+
     assert validate_email("test@example.com") is True
     assert validate_email("user.name@domain.co.uk") is True
     assert validate_email("user+tag@example.org") is True
@@ -38,6 +41,7 @@ def test_email_validation():
 
 def test_config_loading():
     from app.core.config import settings
+
     assert settings.APP_NAME == "Marinade API"
     assert settings.APP_VERSION == "1.0.0"
     assert settings.DATABASE_URL.startswith("postgresql://")
@@ -47,6 +51,7 @@ def test_config_loading():
 def test_database_url_is_built_from_parts():
     """DATABASE_URL doit être dérivé des variables, pas figé dans un test."""
     from app.core.config import Settings
+
     settings = Settings(
         DB_HOST="db.example.test",
         DB_PORT=6543,
@@ -62,6 +67,7 @@ def test_database_url_is_built_from_parts():
 
 def test_cors_lists_are_parsed():
     from app.core.config import Settings
+
     settings = Settings(
         ALLOW_ORIGINS="http://a.test, http://b.test",
         ALLOW_METHODS="get,post",
@@ -75,6 +81,7 @@ def test_cors_lists_are_parsed():
 def test_test_environment_never_targets_developer_database():
     """Invariant du conftest : la suite ne doit viser aucune base de développement."""
     from app.core.config import settings
+
     assert settings.SKIP_DB_INIT is True
     assert settings.ENVIRONMENT == "test"
     assert settings.DEBUG is False
@@ -106,9 +113,17 @@ def test_exception_hierarchy():
         BusinessLogicError,
         DatabaseError,
     )
+
     exc = MarinadeException("Test message")
     assert exc.message == "Test message"
     assert exc.details is None
-    for exception_type in (AuthenticationError, AuthorizationError, ValidationError, NotFoundError, ConflictError, BusinessLogicError, DatabaseError):
+    for exception_type in (
+        AuthenticationError,
+        AuthorizationError,
+        ValidationError,
+        NotFoundError,
+        ConflictError,
+        BusinessLogicError,
+        DatabaseError,
+    ):
         assert issubclass(exception_type, MarinadeException)
-

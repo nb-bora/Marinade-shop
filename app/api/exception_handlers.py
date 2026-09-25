@@ -8,7 +8,7 @@ from app.utils.exceptions import (
     NotFoundError,
     ConflictError,
     BusinessLogicError,
-    DatabaseError
+    DatabaseError,
 )
 from app.utils.logging import get_logger
 
@@ -40,8 +40,8 @@ async def marinade_exception_handler(request: Request, exc: MarinadeException):
         content={
             "error": exc.__class__.__name__,
             "message": exc.message,
-            "details": exc.details
-        }
+            "details": exc.details,
+        },
     )
 
 
@@ -53,6 +53,6 @@ async def general_exception_handler(request: Request, exc: Exception):
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "error": "InternalServerError",
-            "message": "An unexpected error occurred"
-        }
+            "message": "An unexpected error occurred",
+        },
     )
