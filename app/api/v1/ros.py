@@ -154,7 +154,44 @@ def create_order(
         data.idempotency_key = x_idempotency_key
 
     service = RosService(db)
-    return service.create_order(restaurant_id, data)
+    order = service.create_order(restaurant_id, data)
+    invoice = service.get_invoice_for_order(order)
+    response = OrderResponse.model_validate(order)
+    if invoice is not None:
+        response = response.model_copy(
+            update={"invoice_id": invoice.id, "invoice_number": invoice.invoice_number}
+        )
+    return response
+
+
+@router.get(
+    "/restaurants/{restaurant_id}/invoices/{invoice_id}",
+    dependencies=[Depends(perm.FRONT_OF_HOUSE)],
+    response_model=InvoiceResponse,
+    summary="Consulter une facture (montant payé et reste dû)",
+)
+def get_invoice(
+    restaurant_id: UUID,
+    invoice_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return RosService(db).get_invoice(restaurant_id, invoice_id)
+
+
+@router.get(
+    "/restaurants/{restaurant_id}/sessions/{session_id}/invoice",
+    dependencies=[Depends(perm.FRONT_OF_HOUSE)],
+    response_model=InvoiceResponse,
+    summary="Facture d'une session (l'addition de la table)",
+)
+def get_session_invoice(
+    restaurant_id: UUID,
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return RosService(db).get_session_invoice(restaurant_id, session_id)
 
 
 # -----------------------------------------------------------------------------

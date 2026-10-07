@@ -120,7 +120,7 @@ def create_reservation(
         customer_name=reservation_data.customer_name,
         customer_phone=reservation_data.customer_phone,
         customer_email=reservation_data.customer_email,
-        status=reservation_data.status,
+        status=ReservationStatus.PENDING.value,
         party_size=reservation_data.party_size,
         reservation_date=reservation_data.reservation_date,
         duration_minutes=reservation_data.duration_minutes,
@@ -133,7 +133,7 @@ def create_reservation(
     db.add(reservation)
     db.flush()
     _create_reservation_guests(db, reservation.id, reservation_data.invites)
-    db.commit()
+    db.flush()
     db.refresh(reservation)
     return _reservation_to_response(db, reservation)
 
@@ -217,7 +217,7 @@ def update_reservation(
     )
     for field, value in changes.items():
         setattr(reservation, field, value)
-    db.commit()
+    db.flush()
     db.refresh(reservation)
     return _reservation_to_response(db, reservation)
 
@@ -241,7 +241,7 @@ def delete_reservation(
         ReservationGuest.reservation_id == reservation_id
     ).delete()
     db.delete(reservation)
-    db.commit()
+    db.flush()
     return None
 
 
@@ -266,7 +266,7 @@ def confirm_reservation(
         reservation.notes = reservation.notes + "\n" + request_data.notes
     elif request_data and request_data.notes:
         reservation.notes = request_data.notes
-    db.commit()
+    db.flush()
     db.refresh(reservation)
     return _reservation_to_response(db, reservation)
 
@@ -287,7 +287,7 @@ def check_in_reservation(
         )
     reservation.status = ReservationStatus.CHECKED_IN.value
     reservation.checked_in_at = datetime.now(timezone.utc)
-    db.commit()
+    db.flush()
     db.refresh(reservation)
     return _reservation_to_response(db, reservation)
 
@@ -311,7 +311,7 @@ def cancel_reservation(
     reservation.cancelled_at = datetime.now(timezone.utc)
     reservation.cancelled_by = current_user.id
     reservation.cancel_reason = cancel_data.reason
-    db.commit()
+    db.flush()
     db.refresh(reservation)
     return _reservation_to_response(db, reservation)
 
@@ -354,7 +354,7 @@ def create_waitlist_entry(
         joined_at=datetime.now(timezone.utc),
     )
     db.add(entry)
-    db.commit()
+    db.flush()
     db.refresh(entry)
     return WaitlistResponse.model_validate(entry)
 
@@ -397,7 +397,7 @@ def seat_waitlist_entry(
     entry.seated_at = datetime.now(timezone.utc)
     if table_id:
         entry.assigned_table_id = table_id
-    db.commit()
+    db.flush()
     db.refresh(entry)
     return WaitlistResponse.model_validate(entry)
 
@@ -423,5 +423,5 @@ def remove_waitlist_entry(
         entry.notes = entry.notes + "\n" + reason
     elif reason:
         entry.notes = reason
-    db.commit()
+    db.flush()
     return None

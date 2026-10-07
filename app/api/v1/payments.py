@@ -112,14 +112,14 @@ async def webhook(
     # before looking up the payment configuration; the signature is still
     # mandatory and is verified against that tenant's secret.
     set_db_context(db, "app.current_tenant_id", str(restaurant_id))
+    signature = request.headers.get(settings.EASYTRANSACT_WEBHOOK_SIGNATURE_HEADER)
+    service = EasyTransactPaymentService(db)
+    service.authenticate_webhook(restaurant_id, raw_body, signature)
     try:
         payload = json.loads(raw_body)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
-    signature = request.headers.get(settings.EASYTRANSACT_WEBHOOK_SIGNATURE_HEADER)
-    intent, duplicate = EasyTransactPaymentService(db).process_webhook(
-        payload, raw_body, signature
-    )
+    intent, duplicate = service.process_webhook(payload, raw_body, signature)
     if intent.restaurant_id != restaurant_id:
         raise HTTPException(status_code=404, detail="Payment intent not found")
     return {"accepted": True, "duplicate": duplicate, "status": intent.status}

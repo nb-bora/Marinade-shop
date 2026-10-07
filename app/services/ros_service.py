@@ -361,6 +361,25 @@ class RosService:
 
         return invoice
 
+    def get_invoice_for_order(self, order: RosOrder) -> Optional[RosInvoice]:
+        if order.session_id:
+            return self.invoice_repo.get_by_session(order.session_id)
+        return self.invoice_repo.get_by_order(order.id)
+
+    def get_invoice(self, restaurant_id: uuid.UUID, invoice_id: uuid.UUID) -> RosInvoice:
+        invoice = self.invoice_repo.get(str(invoice_id))
+        if not invoice or invoice.restaurant_id != restaurant_id:
+            raise NotFoundError(f"Facture {invoice_id} introuvable")
+        return invoice
+
+    def get_session_invoice(
+        self, restaurant_id: uuid.UUID, session_id: uuid.UUID
+    ) -> RosInvoice:
+        invoice = self.invoice_repo.get_by_session(session_id)
+        if not invoice or invoice.restaurant_id != restaurant_id:
+            raise NotFoundError(f"Aucune facture pour la session {session_id}")
+        return invoice
+
     # -------------------------------------------------------------------------
     # PRODUCTION TICKETS (KDS / BAR DISPLAY)
     # -------------------------------------------------------------------------

@@ -64,6 +64,7 @@ from app.utils.logging import get_logger
 from app.utils.enums import CommandeStatut, RefundStatus, TableStatut
 from app.utils.exceptions import (
     BusinessLogicError,
+    ConflictError,
     NotFoundError,
     ValidationError,
 )
@@ -474,6 +475,34 @@ class PlatService:
         self.plat_repo = PlatRepository(db)
         self.category_repo = MenuCategoryRepository(db)
         self.restaurant_repo = RestaurantRepository(db)
+        self.plat_composant_repo = PlatComposantRepository(db)
+        self.composant_repo = ComposantRepository(db)
+
+    def _set_composants(
+        self, plat: Plat, composant_ids: List[uuid.UUID]
+    ) -> None:
+        """Remplace la nomenclature du plat par ces composants (quantité 1 chacun).
+
+        `composant_ids` est un raccourci d'écriture : le détail (quantités, unités)
+        se règle ensuite via /plats/{id}/composants. Plat n'a pas de colonne
+        `composant_ids` : la liste ne doit jamais atteindre le modèle.
+        """
+        if len(set(composant_ids)) != len(composant_ids):
+            raise ValueError("Duplicate composant in composant_ids")
+        lines = []
+        for index, composant_id in enumerate(composant_ids):
+            composant = self.composant_repo.get(str(composant_id))
+            if not composant or composant.restaurant_id != plat.restaurant_id:
+                raise ValueError(f"Composant {composant_id} not found for this restaurant")
+            lines.append(
+                {
+                    "composant_id": composant_id,
+                    "quantite": 1,
+                    "unite": "portion",
+                    "ordre": index,
+                }
+            )
+        self.plat_composant_repo.replace_for_plat(plat.id, lines)
 
     def create_plat(self, plat_data: PlatCreate, restaurant_id: uuid.UUID) -> Plat:
         # Valider que le restaurant existe
@@ -500,9 +529,11 @@ class PlatService:
             logger.warning(f"Invalid price: {plat_data.prix}")
             raise ValueError("Price must be positive")
 
-        plat = self.plat_repo.create(
-            {**plat_data.model_dump(), "restaurant_id": restaurant_id}
-        )
+        values = plat_data.model_dump()
+        composant_ids = values.pop("composant_ids", None) or []
+        plat = self.plat_repo.create({**values, "restaurant_id": restaurant_id})
+        if composant_ids:
+            self._set_composants(plat, composant_ids)
         logger.info(f"Plat created: {plat.id}")
         return plat
 
@@ -542,9 +573,12 @@ class PlatService:
             logger.warning(f"Invalid price: {plat_data.prix}")
             raise ValueError("Price must be positive")
 
-        updated_plat = self.plat_repo.update(
-            plat, plat_data.model_dump(exclude_unset=True)
-        )
+        changes = plat_data.model_dump(exclude_unset=True)
+        composant_ids = changes.pop("composant_ids", None)
+        updated_plat = self.plat_repo.update(plat, changes)
+        if composant_ids is not None:
+            # Liste vide = vider la nomenclature ; absence du champ = ne rien changer.
+            self._set_composants(updated_plat, composant_ids)
         logger.info(f"Plat updated: {plat_id}")
         return updated_plat
 
@@ -1065,6 +1099,24 @@ class CommandeService:
 
     # ========== Refunds ==========
 
+    def get_refunds(self, commande_id: uuid.UUID) -> List[CommandeRefund]:
+        if not self.commande_repo.get(str(commande_id)):
+            raise NotFoundError("Commande not found")
+        return self.refund_repo.get_by_commande_id(commande_id)
+
+    def get_refund(
+        self, commande_id: uuid.UUID, refund_id: uuid.UUID
+    ) -> CommandeRefund:
+        """Remboursement `refund_id`, à condition qu'il appartienne à `commande_id`.
+
+        L'URL porte les deux identifiants : sans ce contrôle, on pouvait traiter le
+        remboursement d'une autre commande en passant n'importe quel `commande_id`.
+        """
+        refund = self.refund_repo.get(str(refund_id))
+        if not refund or refund.commande_id != commande_id:
+            raise NotFoundError("Refund not found")
+        return refund
+
     def request_refund(
         self,
         commande_id: uuid.UUID,
@@ -1242,31 +1294,26 @@ class PlatComposantService:
                 "Plat and composant must belong to the same restaurant"
             )
 
-    def create(self, data: PlatComposantCreate) -> PlatComposant:
-        self._validate_same_restaurant(data.plat_id, data.composant_id)
-        existing = self.plat_composant_repo.get_by_plat_and_composant(
-            data.plat_id, data.composant_id
-        )
-        if existing:
-            raise BusinessLogicError(
+    def create(self, plat_id: uuid.UUID, data: PlatComposantCreate) -> PlatComposant:
+        self._validate_same_restaurant(plat_id, data.composant_id)
+        existing_lines = self.plat_composant_repo.get_by_plat_id(plat_id)
+        if any(line.composant_id == data.composant_id for line in existing_lines):
+            raise ConflictError(
                 "PlatComposant already exists for this plat/composant pair"
             )
         obj = self.plat_composant_repo.create(
             {
-                "plat_id": data.plat_id,
+                "plat_id": plat_id,
                 "composant_id": data.composant_id,
                 "quantite": data.quantite,
-                "obligatoire": getattr(data, "obligatoire", True),
-                "ordre": 0,
+                "unite": data.unite,
+                "ordre": len(existing_lines),
             }
         )
         logger.info(
-            f"PlatComposant created: {obj.id} (plat={data.plat_id}, composant={data.composant_id})"
+            f"PlatComposant created: {obj.id} (plat={plat_id}, composant={data.composant_id})"
         )
         return obj
-
-    def get(self, plat_composant_id: uuid.UUID) -> Optional[PlatComposant]:
-        return self.plat_composant_repo.get(str(plat_composant_id))
 
     def get_by_plat(self, plat_id: uuid.UUID) -> List[PlatComposant]:
         plat = self.plat_repo.get(str(plat_id))
@@ -1276,24 +1323,26 @@ class PlatComposantService:
 
     def update(
         self,
-        plat_composant_id: uuid.UUID,
+        plat_id: uuid.UUID,
+        composant_id: uuid.UUID,
         data: PlatComposantUpdate,
     ) -> Optional[PlatComposant]:
-        pc = self.plat_composant_repo.get(str(plat_composant_id))
-        if not pc:
+        line = self.plat_composant_repo.get_by_plat_and_composant(plat_id, composant_id)
+        if not line:
             return None
         updated = self.plat_composant_repo.update(
-            pc, data.model_dump(exclude_unset=True)
+            line, data.model_dump(exclude_unset=True)
         )
-        logger.info(f"PlatComposant updated: {plat_composant_id}")
+        logger.info(f"PlatComposant updated: {line.id}")
         return updated
 
-    def delete(self, plat_composant_id: uuid.UUID) -> bool:
-        result = self.plat_composant_repo.delete(str(plat_composant_id))
-        if result:
-            logger.info(f"PlatComposant deleted: {plat_composant_id}")
-            return True
-        return False
+    def delete(self, plat_id: uuid.UUID, composant_id: uuid.UUID) -> bool:
+        line = self.plat_composant_repo.get_by_plat_and_composant(plat_id, composant_id)
+        if not line:
+            return False
+        self.plat_composant_repo.delete(str(line.id))
+        logger.info(f"PlatComposant deleted: {line.id}")
+        return True
 
     def replace_all_for_plat(
         self,
@@ -1303,9 +1352,10 @@ class PlatComposantService:
         plat = self.plat_repo.get(str(plat_id))
         if not plat:
             raise NotFoundError("Plat not found")
+        composant_ids = [entry.composant_id for entry in composant_list]
+        if len(set(composant_ids)) != len(composant_ids):
+            raise ValidationError("A composant can appear only once per plat")
         for entry in composant_list:
-            if entry.plat_id != plat_id:
-                raise ValidationError(f"All entries must have plat_id={plat_id}")
             self._validate_same_restaurant(plat_id, entry.composant_id)
 
         prepared: List[dict] = []
@@ -1314,7 +1364,7 @@ class PlatComposantService:
                 {
                     "composant_id": entry.composant_id,
                     "quantite": entry.quantite,
-                    "unite": "portion",
+                    "unite": entry.unite,
                     "ordre": idx,
                 }
             )

@@ -106,6 +106,10 @@ class OrderResponse(BaseModel):
     status: RosOrderStatus
     total_amount: Decimal
     idempotency_key: UUID
+    # Facture à encaisser via /payments. Pour une session, c'est la facture
+    # partagée par toutes les commandes de la session.
+    invoice_id: Optional[UUID] = None
+    invoice_number: Optional[str] = None
     items: List[OrderItemResponse] = []
     created_at: datetime
     updated_at: datetime

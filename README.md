@@ -65,24 +65,22 @@ Aucune ligne ci-dessous n'est cachée : ce sont les écarts constatés à la lec
 - **Authentification** : JWT, rotation des refresh tokens, 2FA réelle branchée sur le login, aucun secret de vérification dans les réponses HTTP.
 - **Rôles d'équipe** appliqués sur les routes sensibles : un serveur ne change ni un prix ni un remboursement, et n'encaisse pas.
 - **Scénarios ROS de bout en bout** : 12 scénarios passent sur une vraie base (commande avec ou sans table, tickets, paiement, encaissement partagé, caisse avec écart, synchronisation hors ligne, stock, isolation).
-- **Parcours complet par l'API avec le rôle applicatif sous RLS réelle** : inscription, connexion, création du restaurant, commande ROS, caisse, reporting, refus d'accès d'un autre propriétaire, droits d'un serveur, 2FA complète avec `pyotp`. 28 vérifications sur 28 passent.
+- **Parcours complet par l'API avec le rôle applicatif sous RLS réelle** : 47 tests d'intégration couvrent l'inscription, la 2FA, le catalogue, la nomenclature des plats, la commande ROS jusqu'à l'encaissement et la clôture de session, les réservations, les remboursements, les abonnements, les transactions, les paiements, l'administration, l'isolation entre restaurants et les droits par rôle.
 
-### Routes qui plantent encore (correction prévue)
+### Routes corrigées lors de la dernière revue
 
-| Route | Cause |
-|---|---|
-| `POST /restaurants/{id}/plats` | `composant_ids` transmis tel quel au modèle `Plat` |
-| `POST /restaurants/menus/{id}/categories` | l'identifiant du menu est passé à la place de celui du restaurant |
-| 4 routes `.../plats/{id}/composants` (nomenclature) | signatures qui ne correspondent pas à `PlatComposantService` |
-| Remboursements (demande, liste, approbation, rejet) | l'objet de formulaire est passé comme montant, `get_refunds` n'existe pas, schéma de réponse différent du modèle |
-| `POST /reservations/restaurants/{id}/reservations` | lit un champ `status` absent du schéma |
-| `PUT /subscriptions/{id}/status` | un statut invalide ou un abonnement introuvable donne une erreur 500 |
-| `PUT /restaurants/tables/{id}`, `PUT /restaurants/commandes/{id}`, `POST .../items` | le cas « introuvable » référence une variable inexistante |
-| Clôture d'une session dont la facture n'a reçu aucun paiement | `RosInvoice.amount_due` utilise `Decimal` sans l'importer |
+Chaque route a été exercée contre une vraie base par `tests/test_api_integration.py`. Étaient cassées, et ne le sont plus :
+
+- création de plat (`composant_ids`), de catégorie (identifiant du menu pris dans l'URL), les quatre routes de nomenclature d'un plat ;
+- demande, liste, approbation et rejet de remboursement ;
+- toutes les routes de réservation et de liste d'attente (elles validaient la transaction en cours de requête, ce qui faisait perdre le contexte du restaurant) ;
+- `PUT /subscriptions/{id}/status` (une valeur inconnue répond désormais `422`, un abonnement inconnu `404`) ;
+- les réponses « introuvable » des tables et des commandes ;
+- la clôture d'une session ROS (`RosInvoice.amount_due`) ;
+- le webhook de paiement : la signature est contrôlée avant toute lecture du contenu, un appelant non authentifié reçoit donc toujours la même réponse.
 
 ### Manques fonctionnels importants
 
-- **Impossible d'encaisser depuis l'API seule** : aucune route ne renvoie l'`invoice_id` d'une commande ROS (la réponse d'une commande ne le contient pas). Les scénarios de test le lisent directement en base.
 - **Prix ROS non contrôlés** : le moteur ROS prend `unit_price` tel qu'envoyé. Le calcul serveur existe pour les commandes historiques, pas encore pour ROS.
 - **Pas de lien ROS ↔ Easy Transact** : les encaissements ROS sont enregistrés (espèces, MTN, Orange, carte, Wave, virement) sans appel au fournisseur.
 - **Écran cuisine temps réel** : le WebSocket est authentifié mais aucun événement n'y est encore diffusé, et son jeton n'est pas revérifié après la connexion.
@@ -486,7 +484,21 @@ La clôture calcule le solde attendu (fond de caisse + espèces encaissées), l'
 
 ### Encaisser
 
-`POST /v1/ros/restaurants/{restaurant_id}/payments` et `.../payments/split` (plusieurs moyens sur une même facture) existent, avec les moyens `CASH`, `MTN_MOMO`, `ORANGE_MONEY`, `CARD`, `WAVE`, `BANK_TRANSFER`. **Limite actuelle** : ces routes demandent un `invoice_id` que l'API ne communique pas encore au client (voir limites).
+La réponse de création d'une commande contient `invoice_id` et `invoice_number`. Pour une session, c'est la facture **partagée** par toutes ses commandes. On la consulte avec :
+
+```http
+GET /v1/ros/restaurants/{restaurant_id}/invoices/{invoice_id}
+GET /v1/ros/restaurants/{restaurant_id}/sessions/{session_id}/invoice     // l'addition de la table
+```
+
+La facture indique `amount_paid` et `amount_due`. On encaisse ensuite :
+
+```http
+POST /v1/ros/restaurants/{restaurant_id}/payments
+{ "invoice_id": "<id>", "payment_method": "CASH", "amount": 8347.50 }
+```
+
+`POST .../payments/split` règle une même facture avec plusieurs moyens (`CASH`, `MTN_MOMO`, `ORANGE_MONEY`, `CARD`, `WAVE`, `BANK_TRANSFER`). Une session ne peut être fermée qu'une fois la facture soldée.
 
 ### Mode hors ligne
 
@@ -504,6 +516,19 @@ Les commandes et paiements enregistrés sans réseau sont rejoués ; chaque él�
 - Stock disponible = stock physique − stock réservé. `GET .../combinaisons/recommandations` ne propose que les combinaisons dont les composants obligatoires sont disponibles.
 - Mouvements : `entree`, `ajustement`, `perte`.
 - Les prix et suppléments d'une commande historique sont calculés **par le serveur** : le client ne peut pas imposer un prix.
+
+**Nomenclature d'un plat.** Un plat consomme des composants à chaque commande. Le plat est désigné par l'URL, jamais par le corps :
+
+```http
+POST /v1/restaurants/plats/{plat_id}/composants      { "composant_id": "<id>", "quantite": 2, "unite": "portion" }
+PUT  /v1/restaurants/plats/{plat_id}/composants/{composant_id}   { "quantite": 3 }
+DELETE /v1/restaurants/plats/{plat_id}/composants/{composant_id}
+PUT  /v1/restaurants/plats/{plat_id}/composants      [ { "composant_id": "...", "quantite": 1 }, ... ]   // remplace tout
+```
+
+Un composant n'apparaît qu'une fois par plat (`409` sinon) et doit appartenir au même restaurant. À la création ou à la modification d'un plat, `composant_ids` est un raccourci qui crée la nomenclature avec une quantité de 1 chacun (`[]` la vide).
+
+**Remboursements** (commandes historiques). Les champs de la demande sont `montant`, `raison` et, pour un remboursement partiel d'articles, `item_ids`. La réponse porte `statut` (`requested`, `approved`, `rejected`…), `effectue_par_id` (qui a demandé) et `traite_par_id` (qui a décidé).
 
 Voir [docs/RESTAURANT_GUIDE.md](docs/RESTAURANT_GUIDE.md) pour la configuration d'un restaurant.
 
@@ -616,7 +641,7 @@ Toutes les routes sont préfixées par `/v1`. La colonne **Accès** résume qui 
 | Méthode | Route | Accès |
 |---|---|---|
 | POST | `/ros/restaurants/{id}/customers`, `.../sessions`, `.../orders` | serveur, caissier, hôte, barman |
-| GET | `/ros/restaurants/{id}/sessions` | serveur, caissier, hôte, barman |
+| GET | `/ros/restaurants/{id}/sessions`, `.../sessions/{session_id}/invoice`, `.../invoices/{invoice_id}` | serveur, caissier, hôte, barman |
 | POST | `/ros/restaurants/{id}/sessions/{session_id}/close` | serveur, caissier, hôte, barman |
 | GET | `/ros/restaurants/{id}/tickets/{station}` | chef, sous-chef, barman, serveur, hôte |
 | PUT | `/ros/restaurants/{id}/tickets/{ticket_id}/status` | chef, sous-chef, barman, serveur, hôte |
@@ -679,7 +704,7 @@ Relire toute migration générée avant de l'appliquer. Les migrations s'exécut
 python -m pytest --ignore=tests/test_ros.py -q
 ```
 
-174 tests, **sans base de données** : ils tournent en quelques secondes et couvrent notamment :
+184 tests, **sans base de données** : ils tournent en quelques secondes et couvrent notamment :
 
 - **Couverture des routes** : échec si une route n'a ni authentification ni garde de restaurant, ou si une action sensible (prix, remboursement, encaissement) est ouverte à un rôle trop large.
 - **Rôles** : décision d'accès pour propriétaire, manager, serveur, caissier, anciens rôles.
@@ -687,6 +712,19 @@ python -m pytest --ignore=tests/test_ros.py -q
 - **Secrets** : aucun jeton dans les réponses, noms de secrets de paiement restreints, webhook signé.
 - **WebSocket** : refus des connexions anonymes ou au jeton falsifié.
 - **Références croisées** : identifiants et clés d'idempotence d'un autre restaurant.
+
+### Tests d'intégration de l'API
+
+`tests/test_api_integration.py` (47 tests) appelle **toutes les routes** contre PostgreSQL, avec le **rôle applicatif** donc sous RLS réelle, comme en production. Il détecte ce que les tests unitaires ne voient pas : une route dont le service a une autre signature, un schéma de réponse différent du modèle, une transaction validée en cours de requête.
+
+Il s'ignore sans `TEST_DATABASE_URL`. Cette URL doit viser une base **jetable** (le nom contient `test`), migrée à la dernière révision, avec le rôle applicatif. Les requêtes sont validées comme en production : les données restent dans cette base.
+
+```powershell
+# 1. créer la base jetable et la migrer (voir Démarrage rapide, avec marinade_test comme nom)
+# 2. lancer
+$env:TEST_DATABASE_URL = "postgresql://marinade_app:...@localhost:5432/marinade_test"
+python -m pytest tests/test_api_integration.py -q
+```
 
 ### Scénarios ROS d'intégration
 

@@ -360,8 +360,17 @@ def create_menu_category(
     db: Session = Depends(get_db),
 ):
     menu_service = MenuService(db)
+    menu = menu_service.get_menu(menu_id)
+    if menu is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Menu not found")
+    if category_data.menu_id not in (None, menu_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="menu_id in the body does not match the URL",
+        )
+    category = category_data.model_copy(update={"menu_id": menu_id})
     try:
-        return menu_service.create_category(category_data, menu_id)
+        return menu_service.create_category(category, menu.restaurant_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -773,7 +782,7 @@ def update_plat(
     },
 )
 def get_plat_composants(plat_id: uuid.UUID, db: Session = Depends(get_db)):
-    return PlatComposantService(db).get_by_plat_id(plat_id)
+    return PlatComposantService(db).get_by_plat(plat_id)
 
 
 @router.post(
@@ -1108,7 +1117,7 @@ def update_table(
         updated_table = table_service.update_table(table_id, table_data)
         if not updated_table:
             raise HTTPException(
-                status_code.HTTP_404_NOT_FOUND, detail="Table not found"
+                status.HTTP_404_NOT_FOUND, detail="Table not found"
             )
         return updated_table
     except ValueError as e:
@@ -1248,11 +1257,11 @@ def update_commande(
         updated_commande = commande_service.update_commande(commande_id, commande_data)
         if not updated_commande:
             raise HTTPException(
-                status_code.HTTP_404_NOT_FOUND, detail="Commande not found"
+                status.HTTP_404_NOT_FOUND, detail="Commande not found"
             )
         return updated_commande
     except ValueError as e:
-        raise HTTPException(status_code.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 @router.post(
@@ -1282,7 +1291,7 @@ def add_commande_item(
     try:
         return commande_service.add_item(commande_id, item_data)
     except ValueError as e:
-        raise HTTPException(status_code.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 @router.get(
@@ -1305,6 +1314,25 @@ def get_commande_items(
 ):
     commande_service = CommandeService(db)
     return commande_service.get_commande_items(commande_id)
+
+
+def _refund_out(refund, restaurant_id: uuid.UUID) -> CommandeRefundResponse:
+    """Traduit la ligne `commande_refunds` (champs en anglais) vers le contrat API."""
+    notes = refund.notes_jsonb or {}
+    return CommandeRefundResponse(
+        id=refund.id,
+        commande_id=refund.commande_id,
+        restaurant_id=restaurant_id,
+        montant=refund.amount,
+        raison=refund.reason,
+        statut=refund.status,
+        effectue_par_id=refund.initiated_by,
+        traite_par_id=refund.processed_by,
+        traite_le=refund.processed_at,
+        item_ids=[uuid.UUID(i) for i in notes.get("items_refund", [])],
+        created_at=refund.created_at,
+        updated_at=refund.updated_at,
+    )
 
 
 # Refunds (flux complet)
@@ -1333,15 +1361,23 @@ def request_refund(
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if refund_data.commande_id not in (None, commande_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="commande_id in the body does not match the URL",
+        )
     service = CommandeService(db)
     try:
-        return service.request_refund(
+        refund = service.request_refund(
             commande_id,
-            refund_data,
+            amount=refund_data.montant,
+            reason=refund_data.raison,
+            items_refund=refund_data.item_ids,
             initiated_by=current_user.id,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return _refund_out(refund, service.get_commande(commande_id).restaurant_id)
 
 
 @router.get(
@@ -1352,7 +1388,9 @@ def request_refund(
 )
 def get_commande_refunds(commande_id: uuid.UUID, db: Session = Depends(get_db)):
     service = CommandeService(db)
-    return service.get_refunds(commande_id)
+    refunds = service.get_refunds(commande_id)
+    restaurant_id = service.get_commande(commande_id).restaurant_id
+    return [_refund_out(refund, restaurant_id) for refund in refunds]
 
 
 @router.post(
@@ -1375,10 +1413,12 @@ def approve_refund(
     db: Session = Depends(get_db),
 ):
     service = CommandeService(db)
+    service.get_refund(commande_id, refund_id)
     try:
-        return service.approve_refund(refund_id, processed_by=current_user.id)
+        refund = service.approve_refund(refund_id, processed_by=current_user.id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return _refund_out(refund, service.get_commande(commande_id).restaurant_id)
 
 
 @router.post(
@@ -1396,9 +1436,11 @@ def reject_refund(
     db: Session = Depends(get_db),
 ):
     service = CommandeService(db)
+    service.get_refund(commande_id, refund_id)
     try:
-        return service.reject_refund(
+        refund = service.reject_refund(
             refund_id, reason=reason, processed_by=current_user.id
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return _refund_out(refund, service.get_commande(commande_id).restaurant_id)

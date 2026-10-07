@@ -304,6 +304,17 @@ class EasyTransactPaymentService:
         if not hmac.compare_digest(expected.lower(), supplied.lower()):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
+    def authenticate_webhook(
+        self, restaurant_id: uuid.UUID, raw_body: bytes, signature: str | None
+    ) -> None:
+        """Check the signature against the restaurant named in the URL.
+
+        Called before the body is even parsed: an unauthenticated caller must not
+        be able to tell an invalid payload (400) from an unknown payment (404) from
+        a bad signature (401), since that would reveal which references exist.
+        """
+        self.verify_webhook(raw_body, signature, self.configuration(restaurant_id))
+
     def process_webhook(
         self, payload: dict[str, Any], raw_body: bytes, signature: str | None
     ) -> tuple[PaymentIntent, bool]:

@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.database import get_db
+from app.utils.enums import SubscriptionStatus
 from app.services.subscription_service import SubscriptionService
 from app.schemas.subscription import (
     SubscriptionTierResponse,
@@ -245,13 +246,16 @@ def create_subscription(
 )
 def update_subscription_status(
     subscription_id: uuid.UUID,
-    status: str,
+    # Le paramètre de requête reste `status` ; le nom Python évite de masquer le
+    # module `status` utilisé pour les codes HTTP (ce qui faisait planter la route
+    # dès qu'un abonnement était introuvable). Une valeur inconnue répond 422.
+    new_status: SubscriptionStatus = Query(..., alias="status"),
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
     subscription = subscription_service.update_subscription_status(
-        subscription_id, status
+        subscription_id, new_status.value
     )
     if not subscription:
         raise HTTPException(

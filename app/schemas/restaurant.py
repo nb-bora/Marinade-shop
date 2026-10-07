@@ -81,7 +81,9 @@ class MenuCategoryBase(BaseModel):
 
 
 class MenuCategoryCreate(MenuCategoryBase):
-    menu_id: uuid.UUID
+    # Le menu vient de l'URL (POST /restaurants/menus/{menu_id}/categories) ;
+    # s'il figure aussi dans le corps, il doit être identique.
+    menu_id: Optional[uuid.UUID] = None
 
 
 class MenuCategoryUpdate(BaseModel):
@@ -224,24 +226,25 @@ class PlatResponse(PlatBase):
 
 
 class PlatComposantBase(BaseModel):
-    plat_id: uuid.UUID
     composant_id: uuid.UUID
     quantite: Decimal = Field(default=1, gt=0)
-    obligatoire: bool = True
+    unite: str = Field(default="portion", min_length=1, max_length=20)
 
 
 class PlatComposantCreate(PlatComposantBase):
-    pass
+    """Ligne de nomenclature : le plat est désigné par l'URL, pas par le corps."""
 
 
 class PlatComposantUpdate(BaseModel):
     quantite: Optional[Decimal] = Field(None, gt=0)
-    obligatoire: Optional[bool] = None
+    unite: Optional[str] = Field(None, min_length=1, max_length=20)
+    ordre: Optional[int] = Field(None, ge=0)
 
 
 class PlatComposantResponse(PlatComposantBase):
     id: uuid.UUID
-    restaurant_id: uuid.UUID
+    plat_id: uuid.UUID
+    ordre: Optional[int] = 0
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -365,21 +368,24 @@ class CommandeUpdate(BaseModel):
 
 
 class CommandeRefundCreate(BaseModel):
-    commande_id: uuid.UUID
+    # La commande vient de l'URL ; si elle figure aussi dans le corps, elle doit
+    # être identique.
+    commande_id: Optional[uuid.UUID] = None
     montant: Decimal = Field(..., gt=0)
     raison: str = Field(..., min_length=1, max_length=500)
     item_ids: Optional[List[uuid.UUID]] = Field(None, min_length=1)
 
 
 class CommandeRefundResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     commande_id: uuid.UUID
     restaurant_id: uuid.UUID
     montant: Decimal
-    raison: str
+    raison: Optional[str] = None
     statut: str
-    effectue_par_id: uuid.UUID
+    effectue_par_id: Optional[uuid.UUID] = None
+    traite_par_id: Optional[uuid.UUID] = None
+    traite_le: Optional[datetime] = None
     item_ids: List[uuid.UUID] = []
     created_at: datetime
     updated_at: datetime
