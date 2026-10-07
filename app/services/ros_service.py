@@ -35,7 +35,7 @@ from app.models.ros import (
     RosCashShift,
     RosAuditLog,
 )
-from app.core.database import set_db_context
+from app.core.database import get_db_context, set_db_context
 from app.models.restaurant import (
     StockComposant,
     StockMouvement,
@@ -149,8 +149,10 @@ class RosService:
         )
         return session
 
-    def get_active_sessions(self, restaurant_id: uuid.UUID) -> List[ServiceSession]:
-        return self.session_repo.get_active_sessions(restaurant_id)
+    def get_active_sessions(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[ServiceSession]:
+        return self.session_repo.get_active_sessions(restaurant_id, skip, limit)
 
     def close_session(
         self,
@@ -384,9 +386,15 @@ class RosService:
     # PRODUCTION TICKETS (KDS / BAR DISPLAY)
     # -------------------------------------------------------------------------
     def get_pending_tickets(
-        self, restaurant_id: uuid.UUID, station: ProductionStation
+        self,
+        restaurant_id: uuid.UUID,
+        station: ProductionStation,
+        skip: int = 0,
+        limit: int = 100,
     ) -> List[ProductionTicket]:
-        return self.ticket_repo.get_pending_by_station(restaurant_id, station.value)
+        return self.ticket_repo.get_pending_by_station(
+            restaurant_id, station.value, skip, limit
+        )
 
     def update_ticket_status(
         self, restaurant_id: uuid.UUID, ticket_id: uuid.UUID, new_status: TicketStatus
@@ -793,9 +801,7 @@ class RosService:
         # Les politiques RLS isolent chaque établissement : une requête unique sur
         # plusieurs restaurants ne verrait que l'établissement courant. On se place
         # donc dans chacun à tour de rôle, puis on restaure le contexte d'origine.
-        previous_tenant = self.db.execute(
-            text("SELECT current_setting('app.current_tenant_id', true)")
-        ).scalar()
+        previous_tenant = get_db_context(self.db, "app.current_tenant_id")
         try:
             for restaurant in user_restaurants:
                 set_db_context(self.db, "app.current_tenant_id", str(restaurant.id))

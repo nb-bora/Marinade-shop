@@ -237,6 +237,7 @@ class StockMouvement(Base):
     __table_args__ = (
         Index("idx_stock_mouvement_composant", "composant_id"),
         Index("idx_stock_mouvement_date", "created_at"),
+        Index("idx_stock_mouvement_composant_date", "composant_id", "created_at"),
         CheckConstraint("quantite > 0", name="check_stock_mouvement_quantite_positive"),
     )
 
@@ -407,6 +408,8 @@ class Commande(Base):
         Index("idx_commande_table", "table_id"),
         Index("idx_commande_statut", "statut"),
         Index("idx_commande_date", "created_at"),
+        Index("idx_commande_restaurant_created", "restaurant_id", "created_at"),
+        Index("idx_commande_restaurant_statut", "restaurant_id", "statut"),
         Index("idx_commande_payment_intent", "payment_intent_id", unique=True),
         Index("idx_commande_refund_status", "refund_status"),
         Index("idx_commande_refund_idempotency", "refund_idempotency_key", unique=True),

@@ -59,6 +59,7 @@ import warnings
 logger = get_logger(__name__)
 
 from app.api import permissions as perm  # noqa: E402
+from app.api.pagination import Page, page_params  # noqa: E402
 
 router = APIRouter(prefix="/restaurants", dependencies=[Depends(require_tenant_path)])
 
@@ -265,9 +266,13 @@ def create_menu(
         404: {"description": "Restaurant introuvable."},
     },
 )
-def get_restaurant_menus(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_restaurant_menus(
+    restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
+):
     menu_service = MenuService(db)
-    return menu_service.get_restaurant_menus(restaurant_id)
+    return menu_service.get_restaurant_menus(restaurant_id, page.skip, page.limit)
 
 
 @router.get(
@@ -391,9 +396,13 @@ def create_menu_category(
         404: {"description": "Menu introuvable."},
     },
 )
-def get_menu_categories(menu_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_menu_categories(
+    menu_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
+):
     menu_service = MenuService(db)
-    return menu_service.get_menu_categories(menu_id)
+    return menu_service.get_menu_categories(menu_id, page.skip, page.limit)
 
 
 @router.put(
@@ -472,8 +481,14 @@ def create_composant(
         404: {"description": "Restaurant introuvable."},
     },
 )
-def get_restaurant_composants(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
-    return CombinaisonService(db).get_restaurant_composants(restaurant_id)
+def get_restaurant_composants(
+    restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
+):
+    return CombinaisonService(db).get_restaurant_composants(
+        restaurant_id, page.skip, page.limit
+    )
 
 
 @router.get(
@@ -489,8 +504,12 @@ def get_restaurant_composants(restaurant_id: uuid.UUID, db: Session = Depends(ge
         404: {"description": "Restaurant introuvable."},
     },
 )
-def get_restaurant_stock(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
-    return StockService(db).get_restaurant_stock(restaurant_id)
+def get_restaurant_stock(
+    restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
+):
+    return StockService(db).get_restaurant_stock(restaurant_id, page.skip, page.limit)
 
 
 @router.post(
@@ -596,9 +615,13 @@ def create_combinaison(
     },
 )
 def get_combinaison_recommandations(
-    restaurant_id: uuid.UUID, db: Session = Depends(get_db)
+    restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
 ):
-    return CombinaisonService(db).get_recommandations(restaurant_id)
+    return CombinaisonService(db).get_recommandations(
+        restaurant_id, page.skip, page.limit
+    )
 
 
 @router.get(
@@ -615,9 +638,13 @@ def get_combinaison_recommandations(
     },
 )
 def get_restaurant_combinaisons(
-    restaurant_id: uuid.UUID, db: Session = Depends(get_db)
+    restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
 ):
-    return CombinaisonService(db).get_restaurant_combinaisons(restaurant_id)
+    return CombinaisonService(db).get_restaurant_combinaisons(
+        restaurant_id, page.skip, page.limit
+    )
 
 
 @router.put(
@@ -700,9 +727,13 @@ def create_plat(
     """,
     responses={200: {"description": "Plats récupérés avec succès."}},
 )
-def get_restaurant_plats(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_restaurant_plats(
+    restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
+):
     plat_service = PlatService(db)
-    return plat_service.get_restaurant_plats(restaurant_id)
+    return plat_service.get_restaurant_plats(restaurant_id, page.skip, page.limit)
 
 
 @router.get(
@@ -927,9 +958,13 @@ def create_boisson(
         404: {"description": "Restaurant introuvable."},
     },
 )
-def get_restaurant_boissons(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_restaurant_boissons(
+    restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
+):
     boisson_service = BoissonService(db)
-    return boisson_service.get_restaurant_boissons(restaurant_id)
+    return boisson_service.get_restaurant_boissons(restaurant_id, page.skip, page.limit)
 
 
 @router.get(
@@ -1039,9 +1074,13 @@ def create_table(
     """,
     responses={200: {"description": "Tables récupérées avec succès."}},
 )
-def get_restaurant_tables(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_restaurant_tables(
+    restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
+):
     table_service = TableService(db)
-    return table_service.get_restaurant_tables(restaurant_id)
+    return table_service.get_restaurant_tables(restaurant_id, page.skip, page.limit)
 
 
 @router.get(
@@ -1056,9 +1095,13 @@ def get_restaurant_tables(restaurant_id: uuid.UUID, db: Session = Depends(get_db
     """,
     responses={200: {"description": "Tables libres récupérées avec succès."}},
 )
-def get_free_tables(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_free_tables(
+    restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
+    db: Session = Depends(get_db),
+):
     table_service = TableService(db)
-    return table_service.get_free_tables(restaurant_id)
+    return table_service.get_free_tables(restaurant_id, page.skip, page.limit)
 
 
 @router.get(
@@ -1171,13 +1214,14 @@ def create_commande(
 )
 def get_restaurant_commandes(
     restaurant_id: uuid.UUID,
-    skip: int = 0,
-    limit: int = 100,
+    page: Page = Depends(page_params),
     db: Session = Depends(get_db),
     _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
-    return commande_service.get_restaurant_commandes(restaurant_id, skip, limit)
+    return commande_service.get_restaurant_commandes(
+        restaurant_id, page.skip, page.limit
+    )
 
 
 @router.get(
@@ -1195,11 +1239,12 @@ def get_restaurant_commandes(
 )
 def get_active_commandes(
     restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
     db: Session = Depends(get_db),
     _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
-    return commande_service.get_active_commandes(restaurant_id)
+    return commande_service.get_active_commandes(restaurant_id, page.skip, page.limit)
 
 
 @router.get(

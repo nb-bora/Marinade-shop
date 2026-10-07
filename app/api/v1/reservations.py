@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.api import permissions as perm
 from app.api.dependencies import get_current_user, require_tenant_path
+from app.api.pagination import Page, page_params
 from app.core.database import get_db
 from app.models.reservation import Reservation, ReservationGuest, WaitlistEntry
 from app.models.restaurant import Table
@@ -66,15 +67,32 @@ def _ensure_same_restaurant(
             )
 
 
-def _reservation_to_response(
-    db: Session, reservation: Reservation
-) -> ReservationResponse:
-    invites = (
+def _guests_by_reservation(
+    db: Session, reservation_ids: List[uuid.UUID]
+) -> Dict[uuid.UUID, List[ReservationGuest]]:
+    """Invites de plusieurs reservations en UNE requete (evite un N+1)."""
+    grouped: Dict[uuid.UUID, List[ReservationGuest]] = {r: [] for r in reservation_ids}
+    if not reservation_ids:
+        return grouped
+    rows = (
         db.query(ReservationGuest)
-        .filter(ReservationGuest.reservation_id == reservation.id)
+        .filter(ReservationGuest.reservation_id.in_(set(reservation_ids)))
+        .order_by(ReservationGuest.created_at, ReservationGuest.id)
         .all()
     )
-    invite_responses = [ReservationGuestResponse.model_validate(i) for i in invites]
+    for row in rows:
+        grouped[row.reservation_id].append(row)
+    return grouped
+
+
+def _reservation_to_response(
+    db: Session,
+    reservation: Reservation,
+    guests: Optional[List[ReservationGuest]] = None,
+) -> ReservationResponse:
+    if guests is None:
+        guests = _guests_by_reservation(db, [reservation.id])[reservation.id]
+    invite_responses = [ReservationGuestResponse.model_validate(i) for i in guests]
     data = {c.name: getattr(reservation, c.name) for c in reservation.__table__.columns}
     data["invites"] = invite_responses
     return ReservationResponse.model_validate(data)
@@ -149,6 +167,7 @@ def list_reservations(
     status: Optional[str] = Query(None, max_length=30),
     table_id: Optional[uuid.UUID] = Query(None),
     search: Optional[str] = Query(None, max_length=255),
+    page: Page = Depends(page_params),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -171,9 +190,14 @@ def list_reservations(
                 Reservation.notes.ilike(search_pattern),
             )
         )
-    query = query.order_by(Reservation.reservation_date.asc())
-    reservations = query.all()
-    return [_reservation_to_response(db, r) for r in reservations]
+    reservations = (
+        query.order_by(Reservation.reservation_date.asc(), Reservation.id)
+        .offset(page.skip)
+        .limit(page.limit)
+        .all()
+    )
+    guests = _guests_by_reservation(db, [r.id for r in reservations])
+    return [_reservation_to_response(db, r, guests[r.id]) for r in reservations]
 
 
 @router.get(
@@ -331,12 +355,12 @@ def create_waitlist_entry(
         db, restaurant_id, table_ids=(waitlist_data.requested_table_id,)
     )
     max_position = (
-        db.query(WaitlistEntry)
+        db.query(func.coalesce(func.max(WaitlistEntry.position), 0))
         .filter(
             WaitlistEntry.restaurant_id == restaurant_id,
             WaitlistEntry.status == "WAITING",
         )
-        .count()
+        .scalar()
     )
     entry = WaitlistEntry(
         restaurant_id=restaurant_id,
@@ -365,13 +389,16 @@ def create_waitlist_entry(
 )
 def list_waitlist(
     restaurant_id: uuid.UUID,
+    page: Page = Depends(page_params),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     entries = (
         db.query(WaitlistEntry)
         .filter(WaitlistEntry.restaurant_id == restaurant_id)
-        .order_by(WaitlistEntry.position.asc())
+        .order_by(WaitlistEntry.position.asc(), WaitlistEntry.id)
+        .offset(page.skip)
+        .limit(page.limit)
         .all()
     )
     return [WaitlistResponse.model_validate(e) for e in entries]

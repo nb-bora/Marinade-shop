@@ -33,6 +33,7 @@ class RosCustomerRepository(BaseRepository[RosCustomer]):
         return (
             self.db.query(RosCustomer)
             .filter(RosCustomer.restaurant_id == restaurant_id)
+            .order_by(RosCustomer.created_at, RosCustomer.id)
             .offset(skip)
             .limit(limit)
             .all()
@@ -43,7 +44,9 @@ class ServiceSessionRepository(BaseRepository[ServiceSession]):
     def __init__(self, db: Session):
         super().__init__(ServiceSession, db)
 
-    def get_active_sessions(self, restaurant_id: UUID) -> List[ServiceSession]:
+    def get_active_sessions(
+        self, restaurant_id: UUID, skip: int = 0, limit: int = 100
+    ) -> List[ServiceSession]:
         return (
             self.db.query(ServiceSession)
             .filter(
@@ -57,6 +60,9 @@ class ServiceSessionRepository(BaseRepository[ServiceSession]):
                     ]
                 ),
             )
+            .order_by(ServiceSession.opened_at, ServiceSession.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 
@@ -107,7 +113,7 @@ class ProductionTicketRepository(BaseRepository[ProductionTicket]):
         super().__init__(ProductionTicket, db)
 
     def get_pending_by_station(
-        self, restaurant_id: UUID, station: str
+        self, restaurant_id: UUID, station: str, skip: int = 0, limit: int = 100
     ) -> List[ProductionTicket]:
         return (
             self.db.query(ProductionTicket)
@@ -118,7 +124,9 @@ class ProductionTicketRepository(BaseRepository[ProductionTicket]):
                     [TicketStatus.QUEUED.value, TicketStatus.IN_PREPARATION.value]
                 ),
             )
-            .order_by(ProductionTicket.created_at.asc())
+            .order_by(ProductionTicket.created_at.asc(), ProductionTicket.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 

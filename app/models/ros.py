@@ -81,6 +81,7 @@ class ServiceSession(Base):
         Index("idx_service_session_restaurant", "restaurant_id"),
         Index("idx_service_session_status", "status"),
         Index("idx_service_session_table", "table_id"),
+        Index("idx_service_session_open", "restaurant_id", "status", "opened_at"),
     )
 
 
@@ -121,6 +122,7 @@ class RosOrder(Base):
         Index("idx_ros_order_restaurant", "restaurant_id"),
         Index("idx_ros_order_session", "session_id"),
         Index("idx_ros_order_status", "status"),
+        Index("idx_ros_order_restaurant_created", "restaurant_id", "created_at"),
         Index("idx_ros_order_idempotency", "idempotency_key", unique=True),
         CheckConstraint("total_amount >= 0", name="check_ros_order_total_positive"),
     )
@@ -180,6 +182,13 @@ class ProductionTicket(Base):
         Index("idx_prod_ticket_restaurant", "restaurant_id"),
         Index("idx_prod_ticket_order", "order_id"),
         Index("idx_prod_ticket_station", "station", "status"),
+        Index(
+            "idx_prod_ticket_queue",
+            "restaurant_id",
+            "station",
+            "status",
+            "created_at",
+        ),
     )
 
 
@@ -227,6 +236,8 @@ class RosInvoice(Base):
         Index("idx_ros_invoice_session", "session_id"),
         Index("idx_ros_invoice_number", "invoice_number", unique=True),
         Index("idx_ros_invoice_status", "status"),
+        Index("idx_ros_invoice_order", "order_id"),
+        Index("idx_ros_invoice_restaurant_status", "restaurant_id", "status"),
         CheckConstraint("total_amount >= 0", name="check_ros_invoice_total_positive"),
     )
 
@@ -257,6 +268,12 @@ class RosPaymentTransaction(Base):
     __table_args__ = (
         Index("idx_ros_pay_restaurant", "restaurant_id"),
         Index("idx_ros_pay_invoice", "invoice_id"),
+        Index(
+            "idx_ros_pay_restaurant_status",
+            "restaurant_id",
+            "status",
+            "payment_method",
+        ),
         Index("idx_ros_pay_idempotency", "idempotency_key", unique=True),
         CheckConstraint("amount > 0", name="check_ros_pay_amount_positive"),
     )
@@ -286,6 +303,7 @@ class RosCashShift(Base):
         Index("idx_cash_shift_restaurant", "restaurant_id"),
         Index("idx_cash_shift_operator", "operator_user_id"),
         Index("idx_cash_shift_status", "status"),
+        Index("idx_cash_shift_open", "restaurant_id", "operator_user_id", "status"),
         CheckConstraint(
             "opening_balance >= 0", name="check_cash_shift_opening_positive"
         ),

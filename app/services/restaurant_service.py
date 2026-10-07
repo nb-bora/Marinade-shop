@@ -128,8 +128,7 @@ class MenuService:
             raise ValueError("Restaurant not found")
 
         # Valider l'unicité du nom dans le restaurant
-        existing_menus = self.menu_repo.get_by_restaurant_id(restaurant_id)
-        if any(menu.name == menu_data.name for menu in existing_menus):
+        if self.menu_repo.name_taken(restaurant_id, menu_data.name):
             logger.warning(f"Menu name already exists in restaurant: {menu_data.name}")
             raise ValueError("Menu name already exists in this restaurant")
 
@@ -142,11 +141,15 @@ class MenuService:
     def get_menu(self, menu_id: uuid.UUID) -> Optional[Menu]:
         return self.menu_repo.get(str(menu_id))
 
-    def get_restaurant_menus(self, restaurant_id: uuid.UUID) -> List[Menu]:
-        return self.menu_repo.get_by_restaurant_id(restaurant_id)
+    def get_restaurant_menus(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Menu]:
+        return self.menu_repo.get_by_restaurant_id(restaurant_id, skip, limit)
 
-    def get_active_menus(self, restaurant_id: uuid.UUID) -> List[Menu]:
-        return self.menu_repo.get_active_menus(restaurant_id)
+    def get_active_menus(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Menu]:
+        return self.menu_repo.get_active_menus(restaurant_id, skip, limit)
 
     def update_menu(self, menu_id: uuid.UUID, menu_data: MenuUpdate) -> Optional[Menu]:
         menu = self.menu_repo.get(str(menu_id))
@@ -156,10 +159,8 @@ class MenuService:
 
         # Valider l'unicité du nom si modifié
         if menu_data.name and menu_data.name != menu.name:
-            existing_menus = self.menu_repo.get_by_restaurant_id(menu.restaurant_id)
-            if any(
-                existing_menu.name == menu_data.name and existing_menu.id != menu.id
-                for existing_menu in existing_menus
+            if self.menu_repo.name_taken(
+                menu.restaurant_id, menu_data.name, exclude_id=menu.id
             ):
                 logger.warning(
                     f"Menu name already exists in restaurant: {menu_data.name}"
@@ -193,8 +194,7 @@ class MenuService:
             raise ValueError("Menu does not belong to this restaurant")
 
         # Valider l'unicité de l'ordre dans le menu
-        existing_categories = self.category_repo.get_by_menu_id(category_data.menu_id)
-        if any(cat.ordre == category_data.ordre for cat in existing_categories):
+        if self.category_repo.ordre_taken(category_data.menu_id, category_data.ordre):
             logger.warning(
                 f"Category order already exists in menu: {category_data.ordre}"
             )
@@ -206,11 +206,15 @@ class MenuService:
         logger.info(f"Menu category created: {category.id}")
         return category
 
-    def get_menu_categories(self, menu_id: uuid.UUID) -> List[MenuCategory]:
-        return self.category_repo.get_by_menu_id(menu_id)
+    def get_menu_categories(
+        self, menu_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[MenuCategory]:
+        return self.category_repo.get_by_menu_id(menu_id, skip, limit)
 
-    def get_restaurant_categories(self, restaurant_id: uuid.UUID) -> List[MenuCategory]:
-        return self.category_repo.get_by_restaurant_id(restaurant_id)
+    def get_restaurant_categories(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[MenuCategory]:
+        return self.category_repo.get_by_restaurant_id(restaurant_id, skip, limit)
 
     def update_category(
         self, category_id: uuid.UUID, category_data: MenuCategoryUpdate
@@ -222,10 +226,8 @@ class MenuService:
 
         # Valider l'unicité de l'ordre si modifié
         if category_data.ordre is not None and category_data.ordre != category.ordre:
-            existing_categories = self.category_repo.get_by_menu_id(category.menu_id)
-            if any(
-                cat.ordre == category_data.ordre and cat.id != category.id
-                for cat in existing_categories
+            if self.category_repo.ordre_taken(
+                category.menu_id, category_data.ordre, exclude_id=category.id
             ):
                 logger.warning(
                     f"Category order already exists in menu: {category_data.ordre}"
@@ -256,10 +258,12 @@ class StockService:
             "updated_at": stock.updated_at,
         }
 
-    def get_restaurant_stock(self, restaurant_id: uuid.UUID) -> List[dict]:
+    def get_restaurant_stock(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[dict]:
         return [
             self._stock_state(stock)
-            for stock in self.stock_repo.get_by_restaurant_id(restaurant_id)
+            for stock in self.stock_repo.get_by_restaurant_id(restaurant_id, skip, limit)
         ]
 
     def add_movement(self, composant_id: uuid.UUID, data: StockMouvementCreate) -> dict:
@@ -349,8 +353,10 @@ class CombinaisonService:
         self.stock_repo.create({"composant_id": composant.id})
         return composant
 
-    def get_restaurant_composants(self, restaurant_id: uuid.UUID) -> List[Composant]:
-        return self.composant_repo.get_by_restaurant_id(restaurant_id)
+    def get_restaurant_composants(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Composant]:
+        return self.composant_repo.get_by_restaurant_id(restaurant_id, skip, limit)
 
     def update_composant(
         self, composant_id: uuid.UUID, data: ComposantUpdate
@@ -369,8 +375,7 @@ class CombinaisonService:
             raise ValueError("A combination must contain at least one component")
         if len(component_ids) != len(set(component_ids)):
             raise ValueError("A combination cannot contain duplicate components")
-        components = self.composant_repo.get_by_restaurant_id(restaurant_id)
-        by_id = {component.id: component for component in components}
+        by_id = self.composant_repo.get_by_ids(restaurant_id, component_ids)
         missing = [
             component_id for component_id in component_ids if component_id not in by_id
         ]
@@ -378,8 +383,11 @@ class CombinaisonService:
             raise ValueError("All components must belong to this restaurant")
         return [by_id[component_id] for component_id in component_ids]
 
-    def _serialize_combinaison(self, combinaison: Combinaison) -> dict:
-        links = self.link_repo.get_by_combinaison_id(combinaison.id)
+    def _serialize_combinaison(
+        self, combinaison: Combinaison, links: Optional[list] = None
+    ) -> dict:
+        if links is None:
+            links = self.link_repo.get_by_combinaison_id(combinaison.id)
         return {
             "id": combinaison.id,
             "restaurant_id": combinaison.restaurant_id,
@@ -414,39 +422,26 @@ class CombinaisonService:
         self.db.flush()
         return self._serialize_combinaison(combinaison)
 
-    def get_restaurant_combinaisons(self, restaurant_id: uuid.UUID) -> List[dict]:
-        return [
-            self._serialize_combinaison(item)
-            for item in self.combinaison_repo.get_by_restaurant_id(restaurant_id)
-        ]
+    def _serialize_many(self, combinaisons: List[Combinaison]) -> List[dict]:
+        # Deux requetes pour toute la page (combinaisons puis liens), pas une par ligne.
+        links = self.link_repo.get_by_combinaison_ids([c.id for c in combinaisons])
+        return [self._serialize_combinaison(c, links[c.id]) for c in combinaisons]
 
-    def get_recommandations(self, restaurant_id: uuid.UUID) -> List[dict]:
-        recommendations = []
-        for combinaison in self.combinaison_repo.get_active_by_restaurant_id(
-            restaurant_id
-        ):
-            links = self.link_repo.get_by_combinaison_id(combinaison.id)
-            component_ids = [link.composant_id for link in links]
-            available = self.composant_repo.get_available_by_ids(
-                restaurant_id, component_ids
-            )
-            available_ids = {component.id for component in available}
-            stocks = {
-                stock.composant_id: stock
-                for stock in self.stock_repo.get_by_restaurant_id(restaurant_id)
-            }
-            if all(
-                not link.obligatoire
-                or (
-                    link.composant_id in available_ids
-                    and stocks.get(link.composant_id)
-                    and stocks[link.composant_id].quantite
-                    > stocks[link.composant_id].reservee
-                )
-                for link in links
-            ):
-                recommendations.append(self._serialize_combinaison(combinaison))
-        return recommendations
+    def get_restaurant_combinaisons(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[dict]:
+        return self._serialize_many(
+            self.combinaison_repo.get_by_restaurant_id(restaurant_id, skip, limit)
+        )
+
+    def get_recommandations(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[dict]:
+        # Un composant obligatoire doit etre disponible ET avoir un stock libre qui
+        # couvre la quantite exigee ; la base le verifie, une page a la fois.
+        return self._serialize_many(
+            self.combinaison_repo.get_sellable(restaurant_id, skip, limit)
+        )
 
     def update_combinaison(
         self, combinaison_id: uuid.UUID, data: CombinaisonUpdate
@@ -540,8 +535,10 @@ class PlatService:
     def get_plat(self, plat_id: uuid.UUID) -> Optional[Plat]:
         return self.plat_repo.get(str(plat_id))
 
-    def get_restaurant_plats(self, restaurant_id: uuid.UUID) -> List[Plat]:
-        return self.plat_repo.get_by_restaurant_id(restaurant_id)
+    def get_restaurant_plats(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Plat]:
+        return self.plat_repo.get_by_restaurant_id(restaurant_id, skip, limit)
 
     def get_available_plats(self, restaurant_id: uuid.UUID) -> List[Plat]:
         return self.plat_repo.get_available_plats(restaurant_id)
@@ -612,8 +609,10 @@ class BoissonService:
     def get_boisson(self, boisson_id: uuid.UUID) -> Optional[Boisson]:
         return self.boisson_repo.get(str(boisson_id))
 
-    def get_restaurant_boissons(self, restaurant_id: uuid.UUID) -> List[Boisson]:
-        return self.boisson_repo.get_by_restaurant_id(restaurant_id)
+    def get_restaurant_boissons(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Boisson]:
+        return self.boisson_repo.get_by_restaurant_id(restaurant_id, skip, limit)
 
     def get_available_boissons(self, restaurant_id: uuid.UUID) -> List[Boisson]:
         return self.boisson_repo.get_available_boissons(restaurant_id)
@@ -670,11 +669,15 @@ class TableService:
     def get_table(self, table_id: uuid.UUID) -> Optional[Table]:
         return self.table_repo.get(str(table_id))
 
-    def get_restaurant_tables(self, restaurant_id: uuid.UUID) -> List[Table]:
-        return self.table_repo.get_by_restaurant_id(restaurant_id)
+    def get_restaurant_tables(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Table]:
+        return self.table_repo.get_by_restaurant_id(restaurant_id, skip, limit)
 
-    def get_free_tables(self, restaurant_id: uuid.UUID) -> List[Table]:
-        return self.table_repo.get_free_tables(restaurant_id)
+    def get_free_tables(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Table]:
+        return self.table_repo.get_free_tables(restaurant_id, skip, limit)
 
     def update_table(
         self, table_id: uuid.UUID, table_data: TableUpdate
@@ -844,8 +847,10 @@ class CommandeService:
     ) -> List[Commande]:
         return self.commande_repo.get_by_restaurant_id(restaurant_id, skip, limit)
 
-    def get_active_commandes(self, restaurant_id: uuid.UUID) -> List[Commande]:
-        return self.commande_repo.get_active_commandes(restaurant_id)
+    def get_active_commandes(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Commande]:
+        return self.commande_repo.get_active_commandes(restaurant_id, skip, limit)
 
     def update_commande(
         self, commande_id: uuid.UUID, commande_data: CommandeUpdate

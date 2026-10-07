@@ -1,19 +1,50 @@
 from functools import lru_cache
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from app.core.config import settings
 
 Base = declarative_base()
 
+_RLS_KEY = "rls_context"
+_ACCESS_KEY = "tenant_access"
+
+
+def set_db_contexts(db: Session, values: dict[str, str | None]) -> None:
+    """Set several transaction-local PostgreSQL settings in ONE round trip.
+
+    The RLS policies read these settings. The values are also remembered on the
+    session so later code can tell what is already active without asking the
+    database (see ``get_db_context``).
+    """
+    items = list(values.items())
+    clauses = ", ".join(f"set_config(:n{i}, :v{i}, true)" for i in range(len(items)))
+    params: dict[str, str] = {}
+    for index, (name, value) in enumerate(items):
+        params[f"n{index}"] = name
+        params[f"v{index}"] = value or ""
+    db.execute(text(f"SELECT {clauses}"), params)
+    db.info.setdefault(_RLS_KEY, {}).update({n: v or "" for n, v in items})
+
 
 def set_db_context(db: Session, name: str, value: str | None) -> None:
     """Set a transaction-local PostgreSQL setting used by the RLS policies."""
-    db.execute(
-        text("SELECT set_config(:name, :value, true)"),
-        {"name": name, "value": value or ""},
-    )
+    set_db_contexts(db, {name: value})
+
+
+def get_db_context(db: Session, name: str) -> str:
+    """Value this session last set for ``name`` in the CURRENT transaction."""
+    return db.info.get(_RLS_KEY, {}).get(name, "")
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _forget_transaction_state(session: Session, transaction) -> None:
+    # set_config(..., true) lasts one transaction: once it ends, the database has
+    # forgotten the context, so everything remembered about it must go too.
+    if transaction.parent is None:
+        session.info.pop(_RLS_KEY, None)
+        session.info.pop(_ACCESS_KEY, None)
 
 
 def database_role_bypasses_rls(db: Session) -> bool | None:

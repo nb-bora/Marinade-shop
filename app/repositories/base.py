@@ -27,8 +27,9 @@ class BaseRepository(Generic[ModelType]):
     def create(self, obj_in: dict) -> ModelType:
         db_obj = self.model(**obj_in)
         self.db.add(db_obj)
+        # Le flush ramène les valeurs générées par la base (created_at, …) avec
+        # INSERT ... RETURNING : un refresh() ajouterait un SELECT par ligne créée.
         self.db.flush()
-        self.db.refresh(db_obj)
         return db_obj
 
     def update(self, db_obj: ModelType, obj_in: dict) -> ModelType:

@@ -160,3 +160,97 @@ def postgres_test_session():
         transaction.rollback()
         connection.close()
         engine.dispose()
+
+
+# --------------------------------------------------------------------------- #
+# Fixtures des tests d'integration PostgreSQL (tests/test_api_integration.py et co.)
+#
+# Elles visent TEST_DATABASE_URL : une base JETABLE (son nom contient "test"),
+# migree a la derniere revision, avec le role APPLICATIF (ni superutilisateur ni
+# proprietaire). Les requetes sont validees (commit) comme en production : les
+# donnees restent dans cette base.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def engine():
+    from urllib.parse import urlparse
+
+    url = os.environ.get("TEST_DATABASE_URL", "").strip()
+    if not url:
+        pytest.skip("Set TEST_DATABASE_URL to run the PostgreSQL API integration tests.")
+    from app.core.config import settings
+
+    name = urlparse(url).path.lstrip("/")
+    assert "test" in name, f"refus : la base '{name}' ne ressemble pas a une base de test"
+    assert url != settings.DATABASE_URL, "TEST_DATABASE_URL must differ from DATABASE_URL"
+
+    eng = create_engine(url, pool_pre_ping=True)
+    with eng.connect() as conn:
+        role = conn.execute(
+            text("select rolsuper or rolbypassrls from pg_roles where rolname = current_user")
+        ).scalar()
+        assert not role, "utiliser le role applicatif : un superutilisateur ignore la RLS"
+        head = conn.execute(text("select version_num from alembic_version")).scalar()
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    expected = ScriptDirectory.from_config(
+        Config(str(ROOT / "alembic.ini"))
+    ).get_current_head()
+    if head != expected:
+        pytest.skip(f"Base de test non migree : {head!r} au lieu de {expected!r}")
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture(scope="module")
+def client(engine):
+    from fastapi.testclient import TestClient
+    from sqlalchemy.orm import sessionmaker
+
+    from app.core import database
+    from app.main import app
+
+    session_factory = sessionmaker(
+        bind=engine, autocommit=False, autoflush=False, expire_on_commit=False
+    )
+    mp = pytest.MonkeyPatch()
+    mp.setattr(database, "get_engine", lambda: engine)
+    mp.setattr(database, "get_session_local", lambda: session_factory)
+    yield TestClient(app)
+    mp.undo()
+
+
+@pytest.fixture(scope="module")
+def owner(client):
+    from tests.support import headers_for, register
+
+    user = register(client, "owner")
+    headers = headers_for(client, user)
+    response = client.post(
+        "/v1/restaurants",
+        headers=headers,
+        json={"name": "Chez Marinade", "currency": "XAF", "city": "Douala", "taux_service": 10},
+    )
+    assert response.status_code == 201, response.text
+    return {**user, "headers": headers, "rid": response.json()["id"]}
+
+
+@pytest.fixture(scope="module")
+def stranger(client):
+    from tests.support import headers_for, register
+
+    user = register(client, "stranger")
+    headers = headers_for(client, user)
+    response = client.post("/v1/restaurants", headers=headers, json={"name": "Autre resto"})
+    assert response.status_code == 201, response.text
+    return {**user, "headers": headers, "rid": response.json()["id"]}
+
+
+@pytest.fixture(scope="module")
+def admin(client, engine):
+    from tests.support import headers_for, register
+
+    user = register(client, "admin")
+    with engine.begin() as conn:
+        conn.execute(text("update users set role = 'admin' where id = :id"), {"id": user["id"]})
+    return {**user, "headers": headers_for(client, user)}

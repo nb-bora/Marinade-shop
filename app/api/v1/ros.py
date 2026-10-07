@@ -47,6 +47,7 @@ from app.schemas.ros import (
 from app.utils.ros_enums import ProductionStation
 
 from app.api import permissions as perm  # noqa: E402
+from app.api.pagination import Page, page_params  # noqa: E402
 
 # Fail-safe : toute route de ce routeur qui désigne un restaurant est d'abord
 # autorisée sur CE restaurant, même si l'on oublie d'y ajouter un contrôle de rôle.
@@ -110,11 +111,12 @@ def open_session(
 )
 def get_active_sessions(
     restaurant_id: UUID,
+    page: Page = Depends(page_params),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     service = RosService(db)
-    return service.get_active_sessions(restaurant_id)
+    return service.get_active_sessions(restaurant_id, page.skip, page.limit)
 
 
 @router.post(
@@ -206,11 +208,12 @@ def get_session_invoice(
 def get_pending_tickets(
     restaurant_id: UUID,
     station: ProductionStation,
+    page: Page = Depends(page_params),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     service = RosService(db)
-    return service.get_pending_tickets(restaurant_id, station)
+    return service.get_pending_tickets(restaurant_id, station, page.skip, page.limit)
 
 
 @router.put(

@@ -1,5 +1,6 @@
-from typing import Optional, List
+from typing import Dict, Optional, List
 from datetime import datetime
+from sqlalchemy import exists, not_, or_
 from sqlalchemy.orm import Session
 from app.models.restaurant import (
     Restaurant,
@@ -37,33 +38,84 @@ class MenuRepository(BaseRepository[Menu]):
     def __init__(self, db: Session):
         super().__init__(Menu, db)
 
-    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[Menu]:
-        return self.db.query(Menu).filter(Menu.restaurant_id == restaurant_id).all()
+    def get_by_restaurant_id(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Menu]:
+        return (
+            self.db.query(Menu)
+            .filter(Menu.restaurant_id == restaurant_id)
+            .order_by(Menu.created_at, Menu.id)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
 
-    def get_active_menus(self, restaurant_id: uuid.UUID) -> List[Menu]:
+    def get_active_menus(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Menu]:
         return (
             self.db.query(Menu)
             .filter(Menu.restaurant_id == restaurant_id, Menu.actif == True)
+            .order_by(Menu.created_at, Menu.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
+
+    def name_taken(
+        self,
+        restaurant_id: uuid.UUID,
+        name: str,
+        exclude_id: Optional[uuid.UUID] = None,
+    ) -> bool:
+        """Un menu du restaurant porte-t-il deja ce nom ? Une seule ligne lue."""
+        query = self.db.query(Menu.id).filter(
+            Menu.restaurant_id == restaurant_id, Menu.name == name
+        )
+        if exclude_id is not None:
+            query = query.filter(Menu.id != exclude_id)
+        return query.first() is not None
 
 
 class MenuCategoryRepository(BaseRepository[MenuCategory]):
     def __init__(self, db: Session):
         super().__init__(MenuCategory, db)
 
-    def get_by_menu_id(self, menu_id: uuid.UUID) -> List[MenuCategory]:
+    def get_by_menu_id(
+        self, menu_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[MenuCategory]:
         return (
             self.db.query(MenuCategory)
             .filter(MenuCategory.menu_id == menu_id)
-            .order_by(MenuCategory.ordre)
+            .order_by(MenuCategory.ordre, MenuCategory.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 
-    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[MenuCategory]:
+    def ordre_taken(
+        self,
+        menu_id: uuid.UUID,
+        ordre: int,
+        exclude_id: Optional[uuid.UUID] = None,
+    ) -> bool:
+        """Une categorie du menu a-t-elle deja cet ordre ? Une seule ligne lue."""
+        query = self.db.query(MenuCategory.id).filter(
+            MenuCategory.menu_id == menu_id, MenuCategory.ordre == ordre
+        )
+        if exclude_id is not None:
+            query = query.filter(MenuCategory.id != exclude_id)
+        return query.first() is not None
+
+    def get_by_restaurant_id(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[MenuCategory]:
         return (
             self.db.query(MenuCategory)
             .filter(MenuCategory.restaurant_id == restaurant_id)
+            .order_by(MenuCategory.created_at, MenuCategory.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 
@@ -72,12 +124,33 @@ class ComposantRepository(BaseRepository[Composant]):
     def __init__(self, db: Session):
         super().__init__(Composant, db)
 
-    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[Composant]:
+    def get_by_restaurant_id(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Composant]:
         return (
             self.db.query(Composant)
             .filter(Composant.restaurant_id == restaurant_id)
+            .order_by(Composant.created_at, Composant.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
+
+    def get_by_ids(
+        self, restaurant_id: uuid.UUID, component_ids: List[uuid.UUID]
+    ) -> Dict[uuid.UUID, Composant]:
+        """Composants du restaurant parmi ces identifiants, en UNE requete indexee."""
+        if not component_ids:
+            return {}
+        rows = (
+            self.db.query(Composant)
+            .filter(
+                Composant.restaurant_id == restaurant_id,
+                Composant.id.in_(set(component_ids)),
+            )
+            .all()
+        )
+        return {row.id: row for row in rows}
 
     def get_available_by_ids(
         self, restaurant_id: uuid.UUID, component_ids: List[uuid.UUID]
@@ -97,22 +170,59 @@ class CombinaisonRepository(BaseRepository[Combinaison]):
     def __init__(self, db: Session):
         super().__init__(Combinaison, db)
 
-    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[Combinaison]:
+    def get_by_restaurant_id(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Combinaison]:
         return (
             self.db.query(Combinaison)
             .filter(Combinaison.restaurant_id == restaurant_id)
+            .order_by(Combinaison.created_at, Combinaison.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 
-    def get_active_by_restaurant_id(
-        self, restaurant_id: uuid.UUID
+    def get_sellable(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
     ) -> List[Combinaison]:
+        """Combinaisons actives dont tous les composants obligatoires sont vendables.
+
+        Un composant est vendable s'il est disponible ET si son stock libre
+        (quantite - reservee) couvre la quantite exigee par la combinaison. Tout est
+        evalue par la base, une page a la fois : aucune boucle par combinaison.
+        """
+        blocking_link = (
+            exists()
+            .where(CombinaisonComposant.combinaison_id == Combinaison.id)
+            .where(CombinaisonComposant.obligatoire.is_(True))
+            .where(
+                exists()
+                .where(Composant.id == CombinaisonComposant.composant_id)
+                .where(
+                    or_(
+                        Composant.disponible.is_(False),
+                        not_(
+                            exists()
+                            .where(StockComposant.composant_id == Composant.id)
+                            .where(
+                                StockComposant.quantite - StockComposant.reservee
+                                >= CombinaisonComposant.quantite
+                            )
+                        ),
+                    )
+                )
+            )
+        )
         return (
             self.db.query(Combinaison)
             .filter(
                 Combinaison.restaurant_id == restaurant_id,
-                Combinaison.disponible == True,
+                Combinaison.disponible.is_(True),
+                not_(blocking_link),
             )
+            .order_by(Combinaison.created_at, Combinaison.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 
@@ -129,6 +239,25 @@ class CombinaisonComposantRepository(BaseRepository[CombinaisonComposant]):
             .filter(CombinaisonComposant.combinaison_id == combinaison_id)
             .all()
         )
+
+    def get_by_combinaison_ids(
+        self, combinaison_ids: List[uuid.UUID]
+    ) -> Dict[uuid.UUID, List[CombinaisonComposant]]:
+        """Liens de plusieurs combinaisons en UNE requete (evite un N+1)."""
+        grouped: Dict[uuid.UUID, List[CombinaisonComposant]] = {
+            combinaison_id: [] for combinaison_id in combinaison_ids
+        }
+        if not combinaison_ids:
+            return grouped
+        rows = (
+            self.db.query(CombinaisonComposant)
+            .filter(CombinaisonComposant.combinaison_id.in_(set(combinaison_ids)))
+            .order_by(CombinaisonComposant.created_at, CombinaisonComposant.id)
+            .all()
+        )
+        for row in rows:
+            grouped[row.combinaison_id].append(row)
+        return grouped
 
     def replace_for_combinaison(
         self, combinaison_id: uuid.UUID, component_ids: List[uuid.UUID]
@@ -160,11 +289,16 @@ class StockComposantRepository(BaseRepository[StockComposant]):
             query = query.with_for_update()
         return query.first()
 
-    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[StockComposant]:
+    def get_by_restaurant_id(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[StockComposant]:
         return (
             self.db.query(StockComposant)
             .join(Composant)
             .filter(Composant.restaurant_id == restaurant_id)
+            .order_by(Composant.created_at, Composant.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 
@@ -186,8 +320,17 @@ class PlatRepository(BaseRepository[Plat]):
     def __init__(self, db: Session):
         super().__init__(Plat, db)
 
-    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[Plat]:
-        return self.db.query(Plat).filter(Plat.restaurant_id == restaurant_id).all()
+    def get_by_restaurant_id(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Plat]:
+        return (
+            self.db.query(Plat)
+            .filter(Plat.restaurant_id == restaurant_id)
+            .order_by(Plat.created_at, Plat.id)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
 
     def get_by_category_id(self, category_id: uuid.UUID) -> List[Plat]:
         return self.db.query(Plat).filter(Plat.category_id == category_id).all()
@@ -251,9 +394,16 @@ class BoissonRepository(BaseRepository[Boisson]):
     def __init__(self, db: Session):
         super().__init__(Boisson, db)
 
-    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[Boisson]:
+    def get_by_restaurant_id(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Boisson]:
         return (
-            self.db.query(Boisson).filter(Boisson.restaurant_id == restaurant_id).all()
+            self.db.query(Boisson)
+            .filter(Boisson.restaurant_id == restaurant_id)
+            .order_by(Boisson.created_at, Boisson.id)
+            .offset(skip)
+            .limit(limit)
+            .all()
         )
 
     def get_by_category(self, restaurant_id: uuid.UUID, category: str) -> List[Boisson]:
@@ -299,8 +449,17 @@ class TableRepository(BaseRepository[Table]):
     def __init__(self, db: Session):
         super().__init__(Table, db)
 
-    def get_by_restaurant_id(self, restaurant_id: uuid.UUID) -> List[Table]:
-        return self.db.query(Table).filter(Table.restaurant_id == restaurant_id).all()
+    def get_by_restaurant_id(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Table]:
+        return (
+            self.db.query(Table)
+            .filter(Table.restaurant_id == restaurant_id)
+            .order_by(Table.created_at, Table.id)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
 
     def get_by_statut(self, restaurant_id: uuid.UUID, statut: str) -> List[Table]:
         return (
@@ -309,10 +468,15 @@ class TableRepository(BaseRepository[Table]):
             .all()
         )
 
-    def get_free_tables(self, restaurant_id: uuid.UUID) -> List[Table]:
+    def get_free_tables(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Table]:
         return (
             self.db.query(Table)
             .filter(Table.restaurant_id == restaurant_id, Table.statut == "libre")
+            .order_by(Table.created_at, Table.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 
@@ -334,7 +498,7 @@ class CommandeRepository(BaseRepository[Commande]):
         return (
             self.db.query(Commande)
             .filter(Commande.restaurant_id == restaurant_id)
-            .order_by(Commande.created_at.desc())
+            .order_by(Commande.created_at.desc(), Commande.id)
             .offset(skip)
             .limit(limit)
             .all()
@@ -350,13 +514,18 @@ class CommandeRepository(BaseRepository[Commande]):
             .all()
         )
 
-    def get_active_commandes(self, restaurant_id: uuid.UUID) -> List[Commande]:
+    def get_active_commandes(
+        self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> List[Commande]:
         return (
             self.db.query(Commande)
             .filter(
                 Commande.restaurant_id == restaurant_id,
                 Commande.statut.in_(["en_cours", "servie"]),
             )
+            .order_by(Commande.created_at, Commande.id)
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 

@@ -103,4 +103,5 @@ class DailyBalance(Base):
         Index(
             "uq_subscription_balance", "subscription_id", "balance_date", unique=True
         ),
+        Index("idx_daily_balance_restaurant_date", "restaurant_id", "balance_date"),
     )

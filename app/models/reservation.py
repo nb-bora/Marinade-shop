@@ -78,6 +78,12 @@ class Reservation(Base):
         Index("idx_reservation_restaurant", "restaurant_id"),
         Index("idx_reservation_table", "table_id"),
         Index("idx_reservation_status", "status"),
+        Index(
+            "idx_reservation_restaurant_status",
+            "restaurant_id",
+            "status",
+            "reservation_date",
+        ),
         Index("idx_reservation_date", "restaurant_id", "reservation_date"),
         Index("idx_reservation_customer", "customer_phone", "customer_email"),
         CheckConstraint("party_size > 0", name="check_reservation_party_size_positive"),
