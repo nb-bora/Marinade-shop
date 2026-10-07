@@ -30,6 +30,18 @@ class Settings(BaseSettings):
 
     EMAIL_FROM: str = "noreply@marinade.local"
     TWO_FACTOR_ISSUER: str = "Marinade"
+    # Clé dédiée au chiffrement des secrets TOTP au repos. À défaut, SECRET_KEY
+    # est utilisée : la faire tourner invalide alors les secrets 2FA existants.
+    TWO_FACTOR_ENCRYPTION_KEY: Optional[str] = None
+
+    # Développement uniquement : renvoie les jetons de vérification / réinitialisation
+    # dans la réponse HTTP, faute de fournisseur email/SMS réel. Interdit en production.
+    DEV_EXPOSE_AUTH_TOKENS: bool = False
+
+    # Rôle propriétaire du schéma, utilisé par Alembic uniquement. L'application
+    # doit se connecter avec un rôle non propriétaire, non superutilisateur et
+    # sans BYPASSRLS, sinon les politiques RLS ne protègent rien.
+    MIGRATION_DATABASE_URL: Optional[str] = None
 
     APP_NAME: str = "Marinade API"
     APP_VERSION: str = "1.0.0"
@@ -94,6 +106,11 @@ class Settings(BaseSettings):
                 )
             if self.ALLOW_LEGACY_PAYMENT_SIMULATION:
                 raise ValueError("Legacy payment simulation is forbidden in production")
+            if self.DEV_EXPOSE_AUTH_TOKENS:
+                raise ValueError(
+                    "DEV_EXPOSE_AUTH_TOKENS must be false in production: "
+                    "verification and reset tokens must never appear in HTTP responses"
+                )
             if not self.EASYTRANSACT_API_BASE_URL or not self.EASYTRANSACT_API_TOKEN:
                 raise ValueError("Easy Transact credentials are required in production")
             if not self.EASYTRANSACT_WEBHOOK_SECRET:

@@ -8,8 +8,14 @@ class KdsConnectionManager:
         # Maps (restaurant_id, station) -> List[WebSocket]
         self.active_connections: Dict[str, List[WebSocket]] = {}
 
-    async def connect(self, websocket: WebSocket, restaurant_id: str, station: str):
-        await websocket.accept()
+    async def connect(
+        self,
+        websocket: WebSocket,
+        restaurant_id: str,
+        station: str,
+        subprotocol: str | None = None,
+    ):
+        await websocket.accept(subprotocol=subprotocol)
         key = f"{restaurant_id}:{station}"
         if key not in self.active_connections:
             self.active_connections[key] = []

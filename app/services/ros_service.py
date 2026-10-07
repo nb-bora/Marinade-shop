@@ -3,6 +3,7 @@ import uuid
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
 from datetime import datetime
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.utils.exceptions import (
@@ -34,12 +35,14 @@ from app.models.ros import (
     RosCashShift,
     RosAuditLog,
 )
+from app.core.database import set_db_context
 from app.models.restaurant import (
     StockComposant,
     StockMouvement,
     CombinaisonComposant,
     Composant,
     Restaurant,
+    Table,
 )
 
 
@@ -79,6 +82,32 @@ class RosService:
     # -------------------------------------------------------------------------
     # CUSTOMER MANAGEMENT
     # -------------------------------------------------------------------------
+    def _ensure_references_belong_to(
+        self,
+        restaurant_id: uuid.UUID,
+        *,
+        session_id: Optional[uuid.UUID] = None,
+        customer_id: Optional[uuid.UUID] = None,
+        table_id: Optional[uuid.UUID] = None,
+    ) -> None:
+        """Reject ids taken from a request body that belong to another restaurant.
+
+        A foreign key only proves a row exists. Without this check a user who is
+        authorized on restaurant A could attach restaurant B's session, customer
+        or table to their own order just by knowing the UUID.
+        """
+        checks = (
+            (session_id, self.session_repo.get, "session"),
+            (customer_id, self.customer_repo.get, "customer"),
+            (table_id, lambda pk: self.db.get(Table, pk), "table"),
+        )
+        for reference, load, label in checks:
+            if reference is None:
+                continue
+            row = load(str(reference) if label != "table" else reference)
+            if row is None or row.restaurant_id != restaurant_id:
+                raise ValidationError(f"Invalid {label} for this restaurant")
+
     def create_customer(
         self, restaurant_id: uuid.UUID, data: CustomerCreate
     ) -> RosCustomer:
@@ -100,6 +129,9 @@ class RosService:
     def open_session(
         self, restaurant_id: uuid.UUID, data: SessionCreate
     ) -> ServiceSession:
+        self._ensure_references_belong_to(
+            restaurant_id, customer_id=data.customer_id, table_id=data.table_id
+        )
         session_dict = data.model_dump()
         session_dict["restaurant_id"] = restaurant_id
         session_dict["status"] = SessionStatus.OPEN.value
@@ -166,10 +198,18 @@ class RosService:
                 data.idempotency_key
             )
             if existing_order:
+                # La clé est unique sur toute la plateforme : ne jamais renvoyer
+                # la commande d'un autre restaurant qui l'aurait déjà utilisée.
+                if existing_order.restaurant_id != restaurant_id:
+                    raise ConflictError("Idempotency key already used")
                 return existing_order
 
         if not data.items:
             raise ValidationError("Une commande doit contenir au moins un article")
+
+        self._ensure_references_belong_to(
+            restaurant_id, session_id=data.session_id, customer_id=data.customer_id
+        )
 
         # Calculate totals
         subtotal = Decimal("0.00")
@@ -355,6 +395,8 @@ class RosService:
                 data.idempotency_key
             )
             if existing_pay:
+                if existing_pay.restaurant_id != restaurant_id:
+                    raise ConflictError("Idempotency key already used")
                 return existing_pay
 
         invoice = self.invoice_repo.get(str(data.invoice_id))
@@ -723,53 +765,34 @@ class RosService:
         user_restaurants = (
             self.db.query(Restaurant).filter(Restaurant.user_id == user_id).all()
         )
-        rest_ids = [r.id for r in user_restaurants]
 
-        if not rest_ids:
-            return {
-                "total_restaurants": 0,
-                "total_revenue": Decimal("0.00"),
-                "total_orders": 0,
-                "revenue_by_channel": {},
-                "payment_method_breakdown": {},
-            }
-
-        invoices = (
-            self.db.query(RosInvoice)
-            .filter(
-                RosInvoice.restaurant_id.in_(rest_ids),
-                RosInvoice.status == InvoiceStatus.PAID.value,
-            )
-            .all()
-        )
-
-        total_revenue = sum([inv.total_amount for inv in invoices], Decimal("0.00"))
-
-        orders = (
-            self.db.query(RosOrder).filter(RosOrder.restaurant_id.in_(rest_ids)).all()
-        )
-
-        total_orders = len(orders)
+        total_revenue = Decimal("0.00")
+        total_orders = 0
         revenue_by_channel: Dict[str, Decimal] = {}
-        for ord_obj in orders:
-            ch = ord_obj.order_channel
-            revenue_by_channel[ch] = (
-                revenue_by_channel.get(ch, Decimal("0.00")) + ord_obj.total_amount
-            )
-
-        payments = (
-            self.db.query(RosPaymentTransaction)
-            .filter(
-                RosPaymentTransaction.restaurant_id.in_(rest_ids),
-                RosPaymentTransaction.status == "SUCCEEDED",
-            )
-            .all()
-        )
-
         pay_breakdown: Dict[str, Decimal] = {}
-        for p in payments:
-            pm = p.payment_method
-            pay_breakdown[pm] = pay_breakdown.get(pm, Decimal("0.00")) + p.amount
+
+        # Les politiques RLS isolent chaque établissement : une requête unique sur
+        # plusieurs restaurants ne verrait que l'établissement courant. On se place
+        # donc dans chacun à tour de rôle, puis on restaure le contexte d'origine.
+        previous_tenant = self.db.execute(
+            text("SELECT current_setting('app.current_tenant_id', true)")
+        ).scalar()
+        try:
+            for restaurant in user_restaurants:
+                set_db_context(self.db, "app.current_tenant_id", str(restaurant.id))
+                figures = self._restaurant_figures(restaurant.id)
+                total_revenue += figures["revenue"]
+                total_orders += figures["orders"]
+                for channel, amount in figures["by_channel"].items():
+                    revenue_by_channel[channel] = (
+                        revenue_by_channel.get(channel, Decimal("0.00")) + amount
+                    )
+                for method, amount in figures["by_method"].items():
+                    pay_breakdown[method] = (
+                        pay_breakdown.get(method, Decimal("0.00")) + amount
+                    )
+        finally:
+            set_db_context(self.db, "app.current_tenant_id", previous_tenant)
 
         return {
             "total_restaurants": len(user_restaurants),
@@ -777,4 +800,44 @@ class RosService:
             "total_orders": total_orders,
             "revenue_by_channel": revenue_by_channel,
             "payment_method_breakdown": pay_breakdown,
+        }
+
+    def _restaurant_figures(self, restaurant_id: uuid.UUID) -> Dict[str, Any]:
+        """Revenue, order count and breakdowns of ONE restaurant (tenant context set)."""
+        invoices = (
+            self.db.query(RosInvoice)
+            .filter(
+                RosInvoice.restaurant_id == restaurant_id,
+                RosInvoice.status == InvoiceStatus.PAID.value,
+            )
+            .all()
+        )
+        orders = (
+            self.db.query(RosOrder).filter(RosOrder.restaurant_id == restaurant_id).all()
+        )
+        payments = (
+            self.db.query(RosPaymentTransaction)
+            .filter(
+                RosPaymentTransaction.restaurant_id == restaurant_id,
+                RosPaymentTransaction.status == "SUCCEEDED",
+            )
+            .all()
+        )
+
+        by_channel: Dict[str, Decimal] = {}
+        for order in orders:
+            by_channel[order.order_channel] = (
+                by_channel.get(order.order_channel, Decimal("0.00"))
+                + order.total_amount
+            )
+        by_method: Dict[str, Decimal] = {}
+        for payment in payments:
+            by_method[payment.payment_method] = (
+                by_method.get(payment.payment_method, Decimal("0.00")) + payment.amount
+            )
+        return {
+            "revenue": sum([inv.total_amount for inv in invoices], Decimal("0.00")),
+            "orders": len(orders),
+            "by_channel": by_channel,
+            "by_method": by_method,
         }

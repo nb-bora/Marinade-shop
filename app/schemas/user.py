@@ -98,6 +98,8 @@ class UserResponse(BaseModel):
 class UserLogin(BaseModel):
     email: str = Field(..., min_length=3, max_length=254)
     password: str = Field(..., min_length=1, max_length=128)
+    # Requis dès que la 2FA est activée : code TOTP à 6 chiffres ou code de secours.
+    two_factor_code: Optional[str] = Field(None, min_length=6, max_length=32)
 
     @field_validator("email")
     @classmethod
@@ -139,3 +141,9 @@ class TwoFactorVerifyRequest(BaseModel):
 
 class TwoFactorRecoveryCodesResponse(BaseModel):
     recovery_codes: List[str]
+
+
+class PasswordConfirmRequest(BaseModel):
+    """Ré-authentification pour les opérations sensibles du compte (2FA)."""
+
+    password: str = Field(..., min_length=1, max_length=128)

@@ -58,6 +58,8 @@ import warnings
 
 logger = get_logger(__name__)
 
+from app.api import permissions as perm  # noqa: E402
+
 router = APIRouter(prefix="/restaurants", dependencies=[Depends(require_tenant_path)])
 
 
@@ -219,6 +221,7 @@ def update_restaurant(
 # Menus
 @router.post(
     "/{restaurant_id}/menus",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=MenuResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-menus"],
@@ -295,6 +298,7 @@ def get_menu(menu_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.put(
     "/menus/{menu_id}",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=MenuResponse,
     tags=["restaurant-menus"],
     summary="Mettre à jour un menu",
@@ -332,6 +336,7 @@ def update_menu(
 # Menu Categories
 @router.post(
     "/menus/{menu_id}/categories",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=MenuCategoryResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-categories"],
@@ -384,6 +389,7 @@ def get_menu_categories(menu_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.put(
     "/categories/{category_id}",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=MenuCategoryResponse,
     tags=["restaurant-categories"],
     summary="Mettre à jour une catégorie de menu",
@@ -421,6 +427,7 @@ def update_menu_category(
 # Composants et combinaisons
 @router.post(
     "/{restaurant_id}/composants",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=ComposantResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-combinations"],
@@ -479,6 +486,7 @@ def get_restaurant_stock(restaurant_id: uuid.UUID, db: Session = Depends(get_db)
 
 @router.post(
     "/composants/{composant_id}/stock/mouvements",
+    dependencies=[Depends(perm.STOCK_KEEPING)],
     response_model=StockComposantResponse,
     tags=["restaurant-stock"],
     summary="Enregistrer un mouvement de stock",
@@ -507,6 +515,7 @@ def add_stock_movement(
 
 @router.put(
     "/composants/{composant_id}",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=ComposantResponse,
     tags=["restaurant-combinations"],
     summary="Modifier la disponibilité ou le prix d’un composant",
@@ -535,6 +544,7 @@ def update_composant(
 
 @router.post(
     "/{restaurant_id}/combinaisons",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=CombinaisonResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-combinations"],
@@ -603,6 +613,7 @@ def get_restaurant_combinaisons(
 
 @router.put(
     "/combinaisons/{combinaison_id}",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=CombinaisonResponse,
     tags=["restaurant-combinations"],
     summary="Modifier une combinaison tarifée",
@@ -641,6 +652,7 @@ def update_combinaison(
 # Plats
 @router.post(
     "/{restaurant_id}/plats",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=PlatResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-plats"],
@@ -712,6 +724,7 @@ def get_plat(plat_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.put(
     "/plats/{plat_id}",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=PlatResponse,
     tags=["restaurant-plats"],
     summary="Mettre à jour un plat",
@@ -765,6 +778,7 @@ def get_plat_composants(plat_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.post(
     "/plats/{plat_id}/composants",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=PlatComposantResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-plats"],
@@ -790,6 +804,7 @@ def add_plat_composant(
 
 @router.put(
     "/plats/{plat_id}/composants/{composant_id}",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=PlatComposantResponse,
     tags=["restaurant-plats"],
     summary="Modifier une ligne de nomenclature",
@@ -816,6 +831,7 @@ def update_plat_composant(
 
 @router.delete(
     "/plats/{plat_id}/composants/{composant_id}",
+    dependencies=[Depends(perm.MANAGEMENT)],
     status_code=status.HTTP_204_NO_CONTENT,
     tags=["restaurant-plats"],
     summary="Supprimer une ligne de nomenclature",
@@ -836,6 +852,7 @@ def delete_plat_composant(
 
 @router.put(
     "/plats/{plat_id}/composants",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=List[PlatComposantResponse],
     tags=["restaurant-plats"],
     summary="Remplacer toute la nomenclature d’un plat",
@@ -856,6 +873,7 @@ def replace_all_plat_composants(
 # Boissons
 @router.post(
     "/{restaurant_id}/boissons",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=BoissonResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-boissons"],
@@ -933,6 +951,7 @@ def get_boisson(boisson_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.put(
     "/boissons/{boisson_id}",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=BoissonResponse,
     tags=["restaurant-boissons"],
     summary="Mettre à jour une boisson",
@@ -970,6 +989,7 @@ def update_boisson(
 # Tables
 @router.post(
     "/{restaurant_id}/tables",
+    dependencies=[Depends(perm.MANAGEMENT)],
     response_model=TableResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-tables"],
@@ -1060,6 +1080,7 @@ def get_table(table_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.put(
     "/tables/{table_id}",
+    dependencies=[Depends(perm.FRONT_OF_HOUSE)],
     response_model=TableResponse,
     tags=["restaurant-tables"],
     summary="Mettre à jour une table",
@@ -1103,6 +1124,7 @@ _LEGACY_DEPRECATED_NOTICE = (
 
 @router.post(
     "/{restaurant_id}/commandes",
+    dependencies=[Depends(perm.FRONT_OF_HOUSE)],
     response_model=CommandeResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-orders"],
@@ -1200,6 +1222,7 @@ def get_commande(
 
 @router.put(
     "/commandes/{commande_id}",
+    dependencies=[Depends(perm.FRONT_OF_HOUSE)],
     response_model=CommandeResponse,
     tags=["restaurant-orders"],
     summary="[DÉPRÉCIÉ] Mettre à jour une commande",
@@ -1234,6 +1257,7 @@ def update_commande(
 
 @router.post(
     "/commandes/{commande_id}/items",
+    dependencies=[Depends(perm.FRONT_OF_HOUSE)],
     response_model=CommandeItemResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-orders"],
@@ -1286,6 +1310,7 @@ def get_commande_items(
 # Refunds (flux complet)
 @router.post(
     "/commandes/{commande_id}/refunds",
+    dependencies=[Depends(perm.CASH_DESK)],
     response_model=CommandeRefundResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["restaurant-orders-refunds"],
@@ -1332,6 +1357,7 @@ def get_commande_refunds(commande_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.post(
     "/commandes/{commande_id}/refunds/{refund_id}/approve",
+    dependencies=[Depends(perm.REFUND_DECISION)],
     response_model=CommandeRefundResponse,
     tags=["restaurant-orders-refunds"],
     summary="Approuver un remboursement (manager/admin)",
@@ -1357,6 +1383,7 @@ def approve_refund(
 
 @router.post(
     "/commandes/{commande_id}/refunds/{refund_id}/reject",
+    dependencies=[Depends(perm.REFUND_DECISION)],
     response_model=CommandeRefundResponse,
     tags=["restaurant-orders-refunds"],
     summary="Rejeter une demande de remboursement",

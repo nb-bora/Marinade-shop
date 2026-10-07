@@ -1,143 +1,119 @@
-# Marinade API
+# Marinade
 
-Marinade est une API FastAPI de gestion d'abonnements, de transactions et d'exploitation de restaurants.
-Elle fournit un socle pour gérer les utilisateurs, les droits d'accès, les offres d'abonnement, les soldes, les points de vente, les menus, les combinaisons de repas, le stock, les commandes et les paiements.
+**Restaurant Operating System (ROS) multi-tenant pour les restaurants du Cameroun, puis d'Afrique francophone.**
 
-Le domaine restaurant est conçu autour d'un catalogue composable : un administrateur peut définir une combinaison comme `riz + sauce tomate + poulet`, lui attribuer un prix, gérer la disponibilité de chaque composant et facturer les suppléments demandés par le client.
+Marinade est une API FastAPI qui réunit, pour un restaurant, ce que l'on achète d'ordinaire en plusieurs outils : catalogue composable, prise de commande en salle, tickets cuisine et bar, caisse, stock et recettes, réservations, paiements Mobile Money, et abonnements SaaS. Chaque restaurant est isolé des autres jusque dans la base de données.
+
+> Ce document décrit ce que le code fait **aujourd'hui**. Les écarts avec la vision sont listés sans fard dans [État d'avancement](#état-davancement-et-limites-connues). Dernière revue complète : 6 octobre 2026.
 
 ## Sommaire
 
-- [Positionnement](#positionnement)
-- [Fonctionnalités](#fonctionnalités)
-- [Architecture](#architecture)
-- [Prérequis](#prérequis)
-- [Installation](#installation)
+- [Vision et positionnement](#vision-et-positionnement)
+- [État d'avancement et limites connues](#état-davancement-et-limites-connues)
+- [Démarrage rapide](#démarrage-rapide)
 - [Configuration](#configuration)
-- [Lancement](#lancement)
-- [Documentation Swagger](#documentation-swagger)
-- [Authentification et rôles](#authentification-et-rôles)
+- [Architecture](#architecture)
+- [Multi-tenant et sécurité](#multi-tenant-et-sécurité)
+- [Authentification](#authentification)
+- [Rôles d'équipe](#rôles-déquipe)
 - [Parcours métier](#parcours-métier)
-- [API disponible](#api-disponible)
-- [Catalogue composé et stock](#catalogue-composé-et-stock)
-- [Paiements et notifications](#paiements-et-notifications)
-- [Migrations Alembic](#migrations-alembic)
+- [Paiements](#paiements)
+- [Référence de l'API](#référence-de-lapi)
+- [Migrations](#migrations)
 - [Tests](#tests)
-- [Sécurité et production](#sécurité-et-production)
+- [Passage en production](#passage-en-production)
 - [Dépannage](#dépannage)
-- [Évolutions recommandées](#évolutions-recommandées)
+- [Documentation complémentaire](#documentation-complémentaire)
 
-## Positionnement
+## Vision et positionnement
 
-Marinade doit être compris comme un noyau de **Restaurant Operating System** :
+Marinade vise à devenir le système d'exploitation de référence des restaurants camerounais : du maquis au restaurant de standing, avec la même base technique.
 
-```text
-Authentification et rôles
-        |
-Abonnements et transactions
-        |
-Restaurant et catalogue
-        |
-Composants -> Combinaisons -> Commandes -> Paiement
-                    |
-               Stock réservé
-```
+Les choix de conception qui en découlent :
 
-Le système est adapté aux restaurants qui vendent des repas personnalisables et doivent gérer des composants variables : bases, sauces, protéines, accompagnements et suppléments.
+- **Localisation native** : francs CFA (XAF), TVA camerounaise de 19,25 % par défaut, numéros `+237`, opérateurs MTN et Orange reconnus par préfixe.
+- **Mobile Money d'abord** : paiement par l'intermédiaire d'Easy Transact, avec webhook signé et journal comptable.
+- **Catalogue composable** : un plat peut être une combinaison de composants (base + sauce + protéine), avec suppléments tarifés côté serveur et stock par composant.
+- **Isolation stricte** : un restaurant ne voit jamais les données d'un autre. Le contrôle est appliqué deux fois, dans l'API et dans PostgreSQL (row level security).
+- **Équipe réelle** : serveur, caissier, chef, sous-chef, barman, hôte, manager, livreur, avec des droits distincts.
+- **Tolérance aux coupures** : synchronisation par lot de commandes et d'encaissements enregistrés hors ligne, rejouable sans doublon grâce aux clés d'idempotence.
 
-## Fonctionnalités
+### Ce qui distingue Marinade, et où il en est
 
-### Plateforme et comptes
+La comparaison porte sur des catégories d'outils (caisses restaurant type Toast, Square, Lightspeed ou Clover ; plateformes de facturation type Stripe Billing ou Chargebee ; offres d'abonnement restaurant de niche). Le détail se trouve dans [docs/POSITIONING_ANALYSIS.md](docs/POSITIONING_ANALYSIS.md).
 
-- Inscription, connexion, refresh token et déconnexion.
-- Authentification JWT.
-- Gestion des utilisateurs et des rôles.
-- Validation des emails, téléphones et mots de passe.
-- Gestion centralisée des erreurs métier.
+| Atout visé | Statut dans le code |
+|---|---|
+| FCFA, TVA 19,25 %, numéros camerounais | Disponible |
+| Orange Money et MTN via Easy Transact (webhook signé, journal) | Disponible pour les commandes historiques et les abonnements ; **pas encore relié au moteur ROS** |
+| Catalogue composable, suppléments, stock réservé | Disponible, avec des corrections de stock à venir |
+| Isolation par restaurant (API + RLS PostgreSQL) | Disponible et vérifiée |
+| Rôles d'équipe granulaires | Disponible |
+| 2FA (TOTP et codes de secours) | Disponible |
+| Tickets cuisine/bar, caisse avec écart, factures, synchronisation hors ligne | Disponible via l'API ROS |
+| Réservations et liste d'attente | Partiel (voir limites) |
+| Alertes et rappels par SMS / WhatsApp | Canaux simulés, aucun envoi réel |
+| Prix calculés côté serveur | Disponible pour les commandes historiques ; **le moteur ROS accepte encore le prix envoyé par la caisse** |
 
-### Abonnements et transactions
+## État d'avancement et limites connues
 
-- Création et gestion des offres d'abonnement.
-- Statuts `pending`, `active`, `suspended`, `cancelled`, `expired`.
-- Soldes quotidiens et réinitialisation des compteurs.
-- Transactions avec identifiants d'idempotence côté domaine transactionnel.
+Aucune ligne ci-dessous n'est cachée : ce sont les écarts constatés à la lecture du code et par les tests.
 
-### Restaurants
+### Ce qui est solide
 
-- Création et mise à jour d'un restaurant.
-- Menus et catégories.
-- Plats et boissons avec prix et disponibilité.
-- Tables, occupation et libération après clôture de commande.
-- Commandes, items et statuts de service.
+- **Isolation tenant** : tout est protégé par un garde d'accès à l'API et par la RLS PostgreSQL (36 tables). Un test parcourt **toutes** les routes et échoue si l'une n'a ni authentification ni garde de restaurant.
+- **Authentification** : JWT, rotation des refresh tokens, 2FA réelle branchée sur le login, aucun secret de vérification dans les réponses HTTP.
+- **Rôles d'équipe** appliqués sur les routes sensibles : un serveur ne change ni un prix ni un remboursement, et n'encaisse pas.
+- **Scénarios ROS de bout en bout** : 12 scénarios passent sur une vraie base (commande avec ou sans table, tickets, paiement, encaissement partagé, caisse avec écart, synchronisation hors ligne, stock, isolation).
+- **Parcours complet par l'API avec le rôle applicatif sous RLS réelle** : inscription, connexion, création du restaurant, commande ROS, caisse, reporting, refus d'accès d'un autre propriétaire, droits d'un serveur, 2FA complète avec `pyotp`. 28 vérifications sur 28 passent.
 
-### Catalogue composé
+### Routes qui plantent encore (correction prévue)
 
-- Composants comme riz, sauce tomate, sauce d'arachide, poulet, poisson ou émincé.
-- Combinaisons tarifées.
-- Suppléments tarifés côté serveur.
-- Recommandations filtrées par disponibilité.
-- Stock physique, stock réservé et mouvements de stock.
-- Consommation du stock au paiement et libération à l'annulation.
+| Route | Cause |
+|---|---|
+| `POST /restaurants/{id}/plats` | `composant_ids` transmis tel quel au modèle `Plat` |
+| `POST /restaurants/menus/{id}/categories` | l'identifiant du menu est passé à la place de celui du restaurant |
+| 4 routes `.../plats/{id}/composants` (nomenclature) | signatures qui ne correspondent pas à `PlatComposantService` |
+| Remboursements (demande, liste, approbation, rejet) | l'objet de formulaire est passé comme montant, `get_refunds` n'existe pas, schéma de réponse différent du modèle |
+| `POST /reservations/restaurants/{id}/reservations` | lit un champ `status` absent du schéma |
+| `PUT /subscriptions/{id}/status` | un statut invalide ou un abonnement introuvable donne une erreur 500 |
+| `PUT /restaurants/tables/{id}`, `PUT /restaurants/commandes/{id}`, `POST .../items` | le cas « introuvable » référence une variable inexistante |
+| Clôture d'une session dont la facture n'a reçu aucun paiement | `RosInvoice.amount_due` utilise `Decimal` sans l'importer |
 
-### Paiements et notifications
+### Manques fonctionnels importants
 
-- Abstraction pour espèces, Orange Money et mobile money.
-- Abstraction de notification email, SMS et WhatsApp.
-- Templates de notifications pour commande, paiement et inscription.
-- Les adaptateurs externes doivent encore être configurés avec les credentials et contrats réels des fournisseurs.
+- **Impossible d'encaisser depuis l'API seule** : aucune route ne renvoie l'`invoice_id` d'une commande ROS (la réponse d'une commande ne le contient pas). Les scénarios de test le lisent directement en base.
+- **Prix ROS non contrôlés** : le moteur ROS prend `unit_price` tel qu'envoyé. Le calcul serveur existe pour les commandes historiques, pas encore pour ROS.
+- **Pas de lien ROS ↔ Easy Transact** : les encaissements ROS sont enregistrés (espèces, MTN, Orange, carte, Wave, virement) sans appel au fournisseur.
+- **Écran cuisine temps réel** : le WebSocket est authentifié mais aucun événement n'y est encore diffusé, et son jeton n'est pas revérifié après la connexion.
+- **Réservations** : les routes écrivent directement, sans contrôle de conflit d'horaire ni de l'état des tables. `ReservationService` (qui le fait) n'est pas branché et utilise d'anciens noms de champs.
+- **Notifications** : les canaux e-mail, SMS et WhatsApp sont **simulés**. Conséquence : mot de passe oublié, vérification d'e-mail et de téléphone ne peuvent pas aboutir en production tant qu'un vrai fournisseur n'est pas intégré.
+- **Pas de limitation de débit** : codes 2FA et code SMS à 6 chiffres sont théoriquement devinables par essais répétés.
+- **Journaux applicatifs** : les loggers des modules ne sont pas rattachés à la configuration, les messages `info` n'apparaissent donc pas.
 
-## Architecture
+### Stock et paiement (correction prévue)
 
-Le projet suit une architecture en couches :
+- Une combinaison payée peut être déduite deux fois du stock.
+- À l'annulation, le stock peut gonfler (libération puis remise d'une quantité jamais retirée).
+- Un remboursement partiel remet en stock toute la commande ; les demandes en attente ne sont pas additionnées, le total remboursé peut donc dépasser le total de la commande.
+- Les plats simples ne sont pas réservés à la commande, seulement déduits au paiement : le webhook peut échouer après que le client a payé.
+- Moteur ROS : pas de verrou sur le stock, pas de contrôle de stock négatif, un `product_id` de plat est ignoré.
+- Encaissements ROS : un client peut payer plus que le dû ; la clôture de caisse additionne les espèces de tous les caissiers ; en synchronisation hors ligne, un élément en erreur peut faire échouer le lot.
 
-```text
-app/api/          Routes FastAPI et validation HTTP
-app/schemas/      Contrats Pydantic des requêtes et réponses
-app/services/     Règles métier et orchestration
-app/repositories/ Accès SQLAlchemy à la base
-app/models/       Modèles persistants
-app/core/         Configuration et base de données
-app/utils/        Exceptions, enums, paiements et notifications
-alembic/          Historique des migrations
-tests/            Tests automatisés
-```
+### Infrastructure
 
-### Structure importante
+- `Dockerfile` et `docker-compose.yml` sont vides : la base se prépare à la main (voir [Démarrage rapide](#démarrage-rapide)).
+- `tests/test_ros.py` écrit dans la base configurée et suppose un superutilisateur (voir [Tests](#tests)).
 
-```text
-app/
-├── api/v1/
-│   ├── auth.py
-│   ├── users.py
-│   ├── subscriptions.py
-│   ├── transactions.py
-│   └── restaurants.py
-├── core/
-│   ├── config.py
-│   └── database.py
-├── models/
-│   ├── user.py
-│   ├── subscription.py
-│   ├── transaction.py
-│   └── restaurant.py
-├── repositories/
-├── schemas/
-├── services/
-└── utils/
-```
+## Démarrage rapide
 
-## Prérequis
+### Prérequis
 
-- Python 3.13 recommandé.
-- PostgreSQL 14 ou version supérieure.
-- `pip` et un environnement virtuel Python.
-- Une base PostgreSQL vide ou accessible.
-- Une clé secrète JWT propre à l'environnement.
+- Python 3.13 (3.14 peut poser problème avec certaines dépendances).
+- PostgreSQL 14 ou plus (développé et testé avec la version 18) ; Docker convient.
+- Optionnel : pgAdmin.
 
-Python 3.14 peut provoquer des incompatibilités avec certaines versions de SQLAlchemy et de leurs dépendances. Pour reproduire l'environnement validé, utiliser Python 3.13.
-
-## Installation
-
-### Windows PowerShell
+### 1. Installer
 
 ```powershell
 py -3.13 -m venv venv
@@ -147,130 +123,96 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-### Linux ou macOS
+Sous Linux ou macOS : `python3.13 -m venv venv && source venv/bin/activate`, puis `cp .env.example .env`.
 
-```bash
-python3.13 -m venv venv
-source venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
+### 2. Préparer la base : deux rôles distincts
+
+La RLS ne protège que si l'application se connecte avec un rôle qui **n'est ni superutilisateur, ni propriétaire des tables, ni `BYPASSRLS`**. Il faut donc deux rôles :
+
+| Rôle | Usage |
+|---|---|
+| `marinade_owner` | Propriétaire de la base. Exécute les migrations Alembic, sert aussi à se connecter avec pgAdmin. |
+| `marinade_app` | Utilisé par l'API. Lit et écrit les données, sans droit sur le schéma. |
+
+Dans un conteneur PostgreSQL existant, en tant que superutilisateur (remplace les mots de passe) :
+
+```sql
+CREATE ROLE marinade_owner LOGIN PASSWORD '...' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+CREATE ROLE marinade_app   LOGIN PASSWORD '...' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+CREATE DATABASE marinade OWNER marinade_owner ENCODING 'UTF8';
+REVOKE ALL ON DATABASE marinade FROM PUBLIC;
+GRANT CONNECT ON DATABASE marinade TO marinade_app;
 ```
 
-Après la copie, modifier `.env` avec les paramètres de PostgreSQL et une vraie clé secrète.
+Puis, **connecté à la base `marinade`** :
 
-## Configuration
+```sql
+GRANT USAGE ON SCHEMA public TO marinade_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE marinade_owner IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO marinade_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE marinade_owner IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO marinade_app;
+```
 
-Les paramètres sont lus depuis `.env` par `app/core/config.py`.
+Avec Docker : `docker exec -i <conteneur> psql -U <superutilisateur> -d postgres` et coller les commandes.
 
-| Variable | Exemple | Rôle |
-|---|---|---|
-| `DB_HOST` | `localhost` | Hôte PostgreSQL |
-| `DB_PORT` | `5432` | Port PostgreSQL |
-| `DB_NAME` | `marinade` | Nom de la base |
-| `DB_USER` | `postgres` | Utilisateur PostgreSQL |
-| `DB_PASSWORD` | `postgres` | Mot de passe PostgreSQL |
-| `SECRET_KEY` | valeur longue aléatoire | Signature JWT |
-| `ALGORITHM` | `HS256` | Algorithme JWT |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Durée de l'access token |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Durée du refresh token |
-| `APP_NAME` | `Marinade API` | Nom de l'application |
-| `APP_VERSION` | `1.0.0` | Version affichée |
-| `DEBUG` | `true` | Mode debug |
-| `ENVIRONMENT` | `development` | Environnement courant |
-| `SKIP_DB_INIT` | `true` | Ne pas créer automatiquement les tables |
-| `ALLOW_ORIGINS` | `http://localhost:3000` | Origines CORS autorisées |
-| `ALLOW_CREDENTIALS` | `true` | Credentials CORS |
-| `ALLOW_METHODS` | `*` | Méthodes CORS |
-| `ALLOW_HEADERS` | `*` | Headers CORS |
-| `HOST` | `0.0.0.0` | Adresse d'écoute |
-| `PORT` | `8000` | Port applicatif |
-
-### Configuration locale recommandée
+### 3. Configurer `.env`
 
 ```dotenv
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=marinade
-DB_USER=postgres
-DB_PASSWORD=postgres
+DB_USER=marinade_app
+DB_PASSWORD=...
+MIGRATION_DATABASE_URL=postgresql://marinade_owner:...@localhost:5432/marinade
 
-SECRET_KEY=changez-cette-valeur-avec-une-cle-longue-et-aleatoire
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-REFRESH_TOKEN_EXPIRE_DAYS=7
-
-APP_NAME=Marinade API
-APP_VERSION=1.0.0
-DEBUG=true
-ENVIRONMENT=development
-SKIP_DB_INIT=true
-
-ALLOW_ORIGINS=http://localhost:3000
-ALLOW_CREDENTIALS=true
-ALLOW_METHODS=*
-ALLOW_HEADERS=*
-
-HOST=0.0.0.0
-PORT=8001
+SECRET_KEY=une-valeur-aleatoire-d-au-moins-32-caracteres
 ```
 
-Ne jamais utiliser `SECRET_KEY` par défaut en production. Ne jamais committer `.env`.
+Le fichier `.env` est ignoré par git. Toutes les variables sont décrites dans [Configuration](#configuration).
 
-## Lancement
-
-### Port 8000
+### 4. Migrer
 
 ```powershell
-.\venv\Scripts\Activate.ps1
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python -m alembic upgrade head
+python -m alembic current      # doit afficher 20260926_1000 (head)
 ```
 
-### Port 8001
+Alembic utilise `MIGRATION_DATABASE_URL` si elle est définie, sinon la connexion de l'application.
+
+### 5. Lancer
 
 ```powershell
-.\venv\Scripts\Activate.ps1
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Ou définir `PORT=8001` et lancer :
+| Adresse | Contenu |
+|---|---|
+| http://localhost:8000/docs | Swagger : tester les routes |
+| http://localhost:8000/redoc | Documentation ReDoc |
+| http://localhost:8000/health | Santé de l'API |
 
-```powershell
-python -m app.main
-```
+Au démarrage, l'API vérifie le rôle de connexion : s'il contourne la RLS, elle le signale par un avertissement (développement) ou **refuse de démarrer** (production).
 
-L'application expose alors :
+### 6. Se connecter avec pgAdmin
 
-- API : `http://localhost:8001`
-- Swagger UI : `http://localhost:8001/docs`
-- ReDoc : `http://localhost:8001/redoc`
-- OpenAPI JSON : `http://localhost:8001/openapi.json`
-- Santé : `http://localhost:8001/health`
+Si pgAdmin tourne dans un autre réseau Docker que PostgreSQL, il ne peut pas joindre le serveur par le nom de son conteneur. Utilise le port publié :
 
-## Documentation Swagger
+| Champ | Valeur |
+|---|---|
+| Host | `host.docker.internal` (ou `localhost` si pgAdmin est installé sur ta machine) |
+| Port | `5432` |
+| Maintenance database | `marinade` |
+| Username | `marinade_owner` |
 
-Swagger est la référence interactive pour les contrats HTTP.
+Rafraîchis ensuite le serveur pour voir `marinade → Schemas → public → Tables`.
 
-1. Lancer l'API.
-2. Ouvrir `/docs`.
-3. Appeler `/v1/auth/login`.
-4. Copier `access_token`.
-5. Cliquer sur **Authorize**.
-6. Saisir `Bearer <access_token>`.
-7. Tester les endpoints protégés.
+### 7. Premier appel
 
-Les routes sont regroupées par domaines : authentification, utilisateurs, abonnements, transactions, restaurants, menus, plats, boissons, tables, commandes, combinaisons et stock.
-
-## Authentification et rôles
-
-### Inscription
+Dans Swagger, ou avec n'importe quel client HTTP :
 
 ```http
 POST /v1/auth/register
-Content-Type: application/json
-```
-
-```json
 {
   "email": "gerant@example.com",
   "phone": "+237600000000",
@@ -281,675 +223,530 @@ Content-Type: application/json
 }
 ```
 
-### Connexion
+Le mot de passe doit faire **12 caractères au minimum**. Le champ `role` est exigé par le schéma mais le serveur impose toujours `restaurant`.
 
 ```http
 POST /v1/auth/login
-Content-Type: application/json
+{ "email": "gerant@example.com", "password": "MotDePasseFort123!" }
 ```
 
-```json
-{
-  "email": "gerant@example.com",
-  "password": "MotDePasseFort123!"
-}
-```
-
-La réponse contient un `access_token` et un `refresh_token`.
-
-### Utilisation du token
-
-```http
-Authorization: Bearer <access_token>
-```
-
-Rôles utilisés par le projet :
-
-- `admin` : administration globale.
-- `pos` : opérations de point de vente et transactions.
-- `restaurant` : gestion opérationnelle d'un restaurant.
-
-Toute route de gestion doit idéalement vérifier à la fois le rôle et l'appartenance au restaurant concerné. Cette isolation fine reste un point de durcissement obligatoire avant la production multi-tenant.
-
-## Parcours métier
-
-### Scénario 1 : créer un restaurant
+Copie l'`access_token`, clique sur **Authorize** dans Swagger et colle-le. Crée ensuite ton restaurant :
 
 ```http
 POST /v1/restaurants
-Authorization: Bearer <access_token>
+{ "name": "Chez Marinade", "currency": "XAF", "city": "Douala", "country": "Cameroun", "taux_service": 10 }
 ```
+
+## Configuration
+
+Les paramètres sont lus dans `.env` (fichier ignoré par git) puis dans les variables d'environnement, qui l'emportent. Modèle : [.env.example](.env.example).
+
+### Base de données
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `DB_HOST` / `DB_PORT` / `DB_NAME` | `localhost` / `5432` / `marinade` | Cible PostgreSQL |
+| `DB_USER` / `DB_PASSWORD` | `postgres` / `postgres` | Rôle **applicatif** (ni superutilisateur ni propriétaire) |
+| `DB_SSLMODE` | `prefer` | Mode TLS |
+| `DB_CONNECT_TIMEOUT_SECONDS` | `5` | Délai de connexion |
+| `MIGRATION_DATABASE_URL` | vide | URL du rôle propriétaire, utilisée par Alembic seulement |
+| `SKIP_DB_INIT` | `true` | Ne pas créer les tables au démarrage (obligatoire en production : on migre avec Alembic) |
+
+### Sécurité
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `SECRET_KEY` | valeur d'exemple | Signature des JWT. 32 caractères minimum, privée, obligatoire en production |
+| `ALGORITHM` | `HS256` | Algorithme JWT |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Durée du jeton d'accès |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Durée du refresh token |
+| `RESET_TOKEN_EXPIRE_MINUTES` | `15` | Validité du lien de réinitialisation et du code SMS |
+| `VERIFICATION_TOKEN_EXPIRE_HOURS` | `24` | Validité du jeton de vérification d'e-mail |
+| `TWO_FACTOR_ISSUER` | `Marinade` | Nom affiché dans l'application d'authentification |
+| `TWO_FACTOR_ENCRYPTION_KEY` | vide | Clé de chiffrement des secrets TOTP. À défaut `SECRET_KEY` est utilisée : la changer invalide alors les secrets 2FA existants. Définir une clé dédiée en production |
+| `DEV_EXPOSE_AUTH_TOKENS` | `false` | **Développement uniquement** : renvoie les jetons de vérification dans la réponse HTTP, faute de fournisseur e-mail/SMS. Refusé en production |
+
+### Application et CORS
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `APP_NAME` / `APP_VERSION` | `Marinade API` / `1.0.0` | Identité de l'application |
+| `DEBUG` | `true` | Mode debug (interdit en production) |
+| `ENVIRONMENT` | `development` | `production`, `prod` ou `staging` activent les contrôles stricts |
+| `ALLOW_ORIGINS` | `http://localhost:3000` | Origines CORS, séparées par des virgules (jamais `*` en production) |
+| `ALLOW_CREDENTIALS` | `true` | Cookies et en-têtes d'authentification CORS |
+| `ALLOW_METHODS` | `GET,POST,PUT,PATCH,DELETE,OPTIONS` | Méthodes CORS |
+| `ALLOW_HEADERS` | `Authorization,Content-Type,X-Request-ID,X-Tenant-ID,X-Signature` | En-têtes CORS |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | Utilisés par `python -m app.main` |
+
+### Easy Transact (paiement Mobile Money)
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `EASYTRANSACT_API_BASE_URL` | vide | URL de l'API du fournisseur |
+| `EASYTRANSACT_API_TOKEN` | vide | Jeton d'API (secret) |
+| `EASYTRANSACT_WEBHOOK_SECRET` | vide | Secret de signature des webhooks (secret) |
+| `EASYTRANSACT_WEBHOOK_SIGNATURE_HEADER` | `X-Signature` | En-tête qui porte la signature |
+| `EASYTRANSACT_WEBHOOK_SIGNATURE_ALGORITHM` | `hmac-sha256` | Seul algorithme accepté |
+| `EASYTRANSACT_WEBHOOK_MAX_BODY_BYTES` | `1048576` | Taille maximale d'un webhook |
+| `EASYTRANSACT_HTTP_TIMEOUT_SECONDS` | `10` | Délai des appels sortants |
+| `EASYTRANSACT_STATUS_REFERENCE_PARAM` | `vendor_reference` | Paramètre de la requête de statut |
+| `ALLOW_LEGACY_PAYMENT_SIMULATION` | `false` | Interdit en production |
+
+Un restaurant peut avoir son propre secret : voir [Paiements](#paiements).
+
+## Architecture
+
+```text
+API (app/api)              Routes FastAPI, validation HTTP, gardes d'accès
+Services (app/services)    Règles métier et orchestration
+Repositories               Accès SQLAlchemy ; ne font jamais de commit
+Modèles / Schémas          Tables PostgreSQL / contrats Pydantic
+```
+
+### Transactions
+
+`get_db` ouvre une session par requête, la valide en fin de requête et l'annule en cas d'exception. Les repositories ne valident jamais : c'est la requête qui est l'unité de travail.
+
+### Structure
+
+```text
+app/
+├── api/
+│   ├── dependencies.py       Authentification, résolution du restaurant, rôles
+│   ├── permissions.py        Matrice des rôles (une seule source de vérité)
+│   ├── exception_handlers.py
+│   └── v1/                   auth, users, subscriptions, transactions, restaurants,
+│                             ros, reservations, payments, operators
+├── core/                     config.py (réglages), database.py (session, contexte RLS)
+├── integrations/             easy_transact.py (client HTTP)
+├── models/                   user, tenant, subscription, transaction, payment,
+│                             restaurant, ros, reservation, operator
+├── repositories/             Accès aux données
+├── schemas/                  Contrats Pydantic
+├── services/                 auth, user, subscription, transaction, restaurant,
+│                             ros, reservation, payment, easy_transact, notification
+└── utils/                    crypto, enums, ros_enums, exceptions, phone,
+                              payment_secrets, payment_methods, notification_channels,
+                              ws_manager, logging
+alembic/versions/             Migrations
+tests/                        Tests automatisés
+docs/                         Guides et analyses
+```
+
+### Gestion des erreurs
+
+Les exceptions métier (`AuthenticationError`, `AuthorizationError`, `ValidationError`, `NotFoundError`, `ConflictError`, `BusinessLogicError`, `DatabaseError`) deviennent des réponses JSON :
 
 ```json
-{
-  "name": "Chez Marinade",
-  "description": "Cuisine africaine traditionnelle",
-  "currency": "XAF",
-  "phone": "+237600000000",
-  "city": "Douala",
-  "country": "Cameroun",
-  "taux_service": 10
-}
+{ "error": "ConflictError", "message": "Idempotency key already used", "details": null }
 ```
 
-Conserver l'identifiant `restaurant_id` retourné : il sera utilisé pour le catalogue, le stock et les commandes.
+Les erreurs d'accès levées par les gardes (`401`, `403`, `404`) gardent le format FastAPI `{ "detail": "..." }`, et les erreurs de validation de requête répondent `422`.
 
-### Scénario 2 : créer un menu et ses catégories
+## Multi-tenant et sécurité
+
+### Un restaurant = un tenant
+
+Chaque table métier porte un `restaurant_id`. Le restaurant visé par une requête est déterminé ainsi :
+
+1. l'identifiant dans l'URL (`/restaurants/{restaurant_id}/...`) ou celui du restaurant propriétaire d'une ressource désignée dans l'URL (une table, un ticket, une commande…) ;
+2. à défaut, l'en-tête `X-Tenant-ID` ;
+3. à défaut, le restaurant dont l'utilisateur est propriétaire, ou son unique appartenance.
+
+Un utilisateur membre de plusieurs restaurants **doit** envoyer `X-Tenant-ID`. Un restaurant auquel l'utilisateur n'a aucun accès répond `404` (et non `403`) pour ne pas en révéler l'existence.
+
+### Deux couches de protection
+
+**Dans l'API** : chaque requête vérifie l'accès au restaurant visé, puis le rôle de l'utilisateur dans ce restaurant. Un routeur ROS est protégé par défaut, de sorte qu'une route ajoutée sans contrôle reste isolée.
+
+**Dans PostgreSQL** : 36 tables ont `ROW LEVEL SECURITY` activée et forcée. La requête place trois variables locales à la transaction (`app.current_user_id`, `app.current_tenant_id`, `app.is_platform_admin`), et les politiques n'exposent que les lignes du restaurant courant. Même une requête qui oublierait un filtre ne verrait pas les données d'un autre restaurant.
+
+Quatre tables n'ont pas de RLS, volontairement : `users`, `refresh_tokens`, `subscription_tiers` et `alembic_version`.
+
+### Pour que la RLS protège vraiment
+
+- L'application doit se connecter avec un rôle `NOSUPERUSER NOBYPASSRLS` qui n'est pas propriétaire des tables (voir [Démarrage rapide](#2-préparer-la-base--deux-rôles-distincts)).
+- Au démarrage, l'API contrôle ce rôle et refuse de démarrer en production s'il contourne la RLS.
+- Limite à connaître : les variables de contexte sont posées par l'application elle-même. La RLS protège contre un oubli de filtre ou une route mal écrite, pas contre un code malveillant déjà exécuté côté serveur.
+
+### Références croisées
+
+Une clé étrangère prouve qu'une ligne existe, pas qu'elle appartient au bon restaurant. Les identifiants envoyés dans un corps de requête (table, client, session) sont donc revérifiés, et une clé d'idempotence déjà utilisée par un autre restaurant produit un conflit au lieu de renvoyer sa commande.
+
+## Authentification
+
+### Jetons
+
+- **Jeton d'accès** : JWT signé, 30 minutes par défaut, à envoyer dans `Authorization: Bearer <jeton>`.
+- **Refresh token** : valeur aléatoire opaque, stockée hachée, **renouvelée à chaque usage**. `POST /v1/auth/refresh?refresh_token=...` retourne une nouvelle paire.
+- **Déconnexion** : `POST /v1/auth/logout` révoque tous les refresh tokens de l'utilisateur. Une réinitialisation de mot de passe fait de même.
+
+### Authentification à deux facteurs (TOTP)
+
+1. `POST /v1/auth/2fa/setup` renvoie le `secret`, une URL `otpauth://` à transformer en QR code, et **8 codes de secours** (affichés une seule fois).
+2. `POST /v1/auth/2fa/confirm` avec un code à 6 chiffres active la 2FA.
+3. Ensuite, `POST /v1/auth/login` exige `two_factor_code` (code TOTP ou code de secours). Sans lui, la réponse est `401` avec `details.two_factor_required = true`.
 
 ```http
-POST /v1/restaurants/{restaurant_id}/menus
+POST /v1/auth/login
+{ "email": "gerant@example.com", "password": "...", "two_factor_code": "123456" }
 ```
 
-```json
-{
-  "name": "Menu du jour",
-  "description": "Formules servies le midi",
-  "actif": true
-}
-```
+- Le secret TOTP est **chiffré en base** ; les codes de secours sont **hachés** et à usage unique.
+- `POST /v1/auth/2fa/recovery-codes` (avec le mot de passe) génère un nouveau lot et invalide l'ancien.
+- `POST /v1/auth/2fa/disable` exige le mot de passe.
 
-Puis créer les catégories : `Bases`, `Sauces`, `Protéines`, `Boissons`.
+### Mot de passe oublié, e-mail et téléphone
 
-### Scénario 3 : vendre des plats simples
+| Route | Rôle |
+|---|---|
+| `POST /v1/auth/forgot-password` | Même réponse que le compte existe ou non |
+| `POST /v1/auth/reset-password` | Jeton valable 15 minutes, usage unique |
+| `POST /v1/auth/send-verification-email` puis `verify-email` | Vérifie l'adresse |
+| `POST /v1/auth/send-verification-phone` puis `verify-phone` | Vérifie le numéro par code à 6 chiffres |
 
-Créer un plat avec `POST /v1/restaurants/{restaurant_id}/plats` :
+Les jetons ne sont **jamais** dans les réponses. Ils partent par e-mail ou SMS, qui sont simulés pour l'instant (voir limites). En développement uniquement, `DEV_EXPOSE_AUTH_TOKENS=true` les renvoie dans la réponse pour permettre les tests.
 
-```json
-{
-  "nom": "Poulet braisé",
-  "description": "Poulet braisé aux épices",
-  "prix": 4500,
-  "devise": "XAF",
-  "disponible": true,
-  "category_id": "<category_id>"
-}
-```
+## Rôles d'équipe
 
-Le plat peut ensuite être ajouté directement à une commande avec `plat_id`.
+Le propriétaire du restaurant, les membres `manager` et les administrateurs de la plateforme passent **tous** les contrôles. Les autres rôles ne passent que là où ils sont listés. La matrice est dans [app/api/permissions.py](app/api/permissions.py).
 
-### Scénario 4 : créer le catalogue composé
+| Domaine | Rôles autorisés (en plus de propriétaire, manager, admin) |
+|---|---|
+| Lecture du catalogue, des tables, du stock, des commandes | Tout membre du restaurant |
+| Créer ou modifier carte, prix, composants, combinaisons, recettes, tables | Manager seul |
+| Mouvements de stock | Chef, sous-chef |
+| Commandes, sessions, clients, statut des tables | Serveur, caissier, hôte, barman |
+| Encaissements, caisse, demande de remboursement | Caissier |
+| Approuver ou rejeter un remboursement | Manager seul |
+| Tickets cuisine et bar | Chef, sous-chef, barman, serveur, hôte |
+| Propositions d'approvisionnement | Chef, sous-chef |
+| Réservations et liste d'attente | Hôte, serveur, caissier |
+| Configuration des paiements d'un restaurant | Manager seul |
 
-Créer séparément les composants :
+Les rôles proviennent de `restaurant_members.staff_role` (`waiter`, `cashier`, `chef`, `sous_chef`, `manager`, `delivery`, `bartender`, `host`). Les anciennes lignes dont seule la colonne `role` est renseignée restent reconnues (`kitchen` vaut chef), et le rôle générique `staff` n'accorde aucun privilège.
+
+Un lot de synchronisation hors ligne qui contient des paiements exige en plus le rôle caissier.
+
+## Parcours métier
+
+Les exemples ci-dessous ne s'appuient que sur des routes qui fonctionnent.
+
+### Prendre une commande en salle (ROS)
 
 ```http
-POST /v1/restaurants/{restaurant_id}/composants
+POST /v1/ros/restaurants/{restaurant_id}/sessions
+{ "table_context": "Terrasse gauche" }
 ```
-
-```json
-{
-  "nom": "Poulet",
-  "type": "proteine",
-  "prix_supplement": 1000,
-  "devise": "XAF",
-  "stock_unite": "portion",
-  "disponible": true
-}
-```
-
-Répéter pour `riz`, `sauce tomate`, `sauce arachide`, `poisson` et `émincé`.
-
-Créer ensuite une combinaison :
 
 ```http
-POST /v1/restaurants/{restaurant_id}/combinaisons
-```
+POST /v1/ros/restaurants/{restaurant_id}/orders
+X-Idempotency-Key: 6f1c1e0a-...   (UUID, optionnel mais recommandé)
 
-```json
 {
-  "nom": "Riz sauce tomate poulet",
-  "description": "Riz accompagné de sauce tomate et poulet",
-  "prix": 3500,
-  "devise": "XAF",
-  "disponible": true,
-  "menu_id": "<menu_id>",
-  "composant_ids": [
-    "<riz_id>",
-    "<sauce_tomate_id>",
-    "<poulet_id>"
+  "session_id": "<id de la session>",
+  "fulfillment_type": "DINE_IN",
+  "order_channel": "POS",
+  "items": [
+    { "product_name": "Poulet braisé", "quantity": 1, "unit_price": 4000,
+      "tax_rate": 19.25, "destination_station": "KITCHEN" },
+    { "product_name": "Jus d'ananas", "quantity": 2, "unit_price": 1500,
+      "destination_station": "BAR" }
   ]
 }
 ```
 
-Le prix `3500 XAF` est le prix de base de la combinaison. Il ne doit jamais être accepté depuis la requête de commande.
+Règles appliquées par le serveur :
 
-### Scénario 5 : approvisionner le stock
+- Total = somme des lignes + TVA par ligne (19,25 % par défaut).
+- `DINE_IN` : commande **confirmée** tout de suite, tickets envoyés à la cuisine et au bar. Le paiement se fait après le repas.
+- `TAKEAWAY`, `DELIVERY`, `COUNTER` : paiement **avant** préparation, la commande reste `PENDING_PAYMENT` et les tickets ne partent qu'une fois payée.
+- Une facture est créée (numéro, empreinte SHA-256) ; plusieurs commandes d'une même session s'ajoutent à la même facture.
+- La même clé d'idempotence rejoue la commande sans la dupliquer.
 
-```http
-POST /v1/restaurants/composants/{composant_id}/stock/mouvements
-Authorization: Bearer <access_token>
-```
-
-```json
-{
-  "type": "entree",
-  "quantite": 50,
-  "notes": "Approvisionnement du matin"
-}
-```
-
-Types de mouvement disponibles :
-
-- `entree` : ajoute une quantité au stock physique.
-- `ajustement` : remplace le stock physique par la quantité indiquée.
-- `perte` : retire une quantité disponible pour perte ou gaspillage.
-
-Consulter le stock :
+### Faire avancer la cuisine et le bar
 
 ```http
-GET /v1/restaurants/{restaurant_id}/stock
+GET /v1/ros/restaurants/{restaurant_id}/tickets/KITCHEN
+PUT /v1/ros/restaurants/{restaurant_id}/tickets/{ticket_id}/status
+{ "status": "IN_PREPARATION" }     // QUEUED, IN_PREPARATION, READY, SERVED
 ```
 
-Le résultat distingue :
+Stations : `KITCHEN`, `BAR`, `DESSERT`, `PACKAGING`.
 
-```text
-quantite   = stock physique
-reservee   = stock engagé par les commandes en cours
-disponible = quantite - reservee
-```
-
-### Scénario 6 : recommander uniquement les offres vendables
+### Caisse
 
 ```http
-GET /v1/restaurants/{restaurant_id}/combinaisons/recommandations
+POST /v1/ros/restaurants/{restaurant_id}/shifts/open     { "opening_balance": 15000 }
+POST /v1/ros/restaurants/{restaurant_id}/shifts/close    { "closing_balance_counted": 15500 }
 ```
 
-Une combinaison est recommandée si elle est active et si ses composants obligatoires sont disponibles.
-Si la sauce tomate est désactivée ou épuisée, les combinaisons qui la nécessitent ne doivent plus être proposées.
+La clôture calcule le solde attendu (fond de caisse + espèces encaissées), l'écart, et l'enregistre dans le journal d'audit. Un second shift ouvert par le même opérateur répond `409`.
 
-### Scénario 7 : commander une combinaison avec supplément
+### Encaisser
 
-Créer d'abord la commande :
+`POST /v1/ros/restaurants/{restaurant_id}/payments` et `.../payments/split` (plusieurs moyens sur une même facture) existent, avec les moyens `CASH`, `MTN_MOMO`, `ORANGE_MONEY`, `CARD`, `WAVE`, `BANK_TRANSFER`. **Limite actuelle** : ces routes demandent un `invoice_id` que l'API ne communique pas encore au client (voir limites).
+
+### Mode hors ligne
 
 ```http
-POST /v1/restaurants/{restaurant_id}/commandes
+POST /v1/ros/restaurants/{restaurant_id}/sync
+{ "orders": [ ... ], "payments": [ ... ] }
 ```
 
-```json
-{
-  "table_id": "<table_id>",
-  "statut": "en_cours",
-  "total": 0
-}
-```
+Les commandes et paiements enregistrés sans réseau sont rejoués ; chaque élément porte sa clé d'idempotence, ce qui rend le rejeu sûr. La réponse indique le nombre d'éléments traités et les erreurs.
 
-Ajouter une combinaison et un supplément :
+### Catalogue composable et stock
 
-```http
-POST /v1/restaurants/commandes/{commande_id}/items
-```
+- Un **composant** (riz, sauce tomate, poulet…) a un prix de supplément, une disponibilité et un stock (`quantite`, `reservee`, `seuil_alerte`).
+- Une **combinaison** a son propre prix et référence des composants du même restaurant.
+- Stock disponible = stock physique − stock réservé. `GET .../combinaisons/recommandations` ne propose que les combinaisons dont les composants obligatoires sont disponibles.
+- Mouvements : `entree`, `ajustement`, `perte`.
+- Les prix et suppléments d'une commande historique sont calculés **par le serveur** : le client ne peut pas imposer un prix.
 
-```json
-{
-  "combinaison_id": "<combinaison_id>",
-  "quantite": 2,
-  "supplement_ids": ["<poisson_id>"],
-  "notes": "Sans piment"
-}
-```
+Voir [docs/RESTAURANT_GUIDE.md](docs/RESTAURANT_GUIDE.md) pour la configuration d'un restaurant.
 
-Le serveur calcule :
+### Réservations et liste d'attente
 
-```text
-prix unitaire facturé = prix combinaison + prix des suppléments
-total item = prix unitaire facturé x quantité
-```
+Création, consultation, confirmation, arrivée (`check-in`), annulation, et liste d'attente avec mise en place d'une table. Voir les limites pour le contrôle de conflits.
 
-Avec une combinaison à `3500 XAF`, un supplément poisson à `1000 XAF` et une quantité de `2` :
+### Abonnements et solde quotidien
 
-```text
-(3500 + 1000) x 2 = 9000 XAF
-```
+Des offres (`SubscriptionTier`) définissent une limite journalière et des prix mensuel et annuel en FCFA. Un restaurant a au plus **un abonnement actif**. Les transactions du point de vente débitent un solde quotidien, avec une clé d'idempotence par restaurant ; une transaction qui dépasserait le solde du jour est refusée. La réinitialisation quotidienne crée le solde à la limite de l'offre.
 
-Le prix envoyé par le client est ignoré pour éviter toute fraude.
+### Commandes historiques (dépréciées)
 
-### Scénario 8 : réservation du stock
+Les routes `/v1/restaurants/.../commandes` (modèle `Commande`) sont marquées `deprecated`, répondent avec l'en-tête `X-Deprecated-Endpoint: use-ros-orders` et sont journalisées. Le moteur ROS est le chemin cible. Elles restent actives le temps de la migration et conservent les remboursements et le calcul de prix côté serveur.
 
-Lorsqu'un item composé est ajouté :
+## Paiements
 
-1. La disponibilité de la combinaison est vérifiée.
-2. Les composants obligatoires sont vérifiés.
-3. Le stock disponible est réservé.
-4. Le prix est calculé côté serveur.
-5. Les exigences de stock sont figées dans `details_jsonb`.
+### Mobile Money via Easy Transact
 
-Deux commandes concurrentes ne doivent pas pouvoir réserver plus que le stock disponible grâce au verrouillage de ligne utilisé lors de la réservation.
+1. `PUT /v1/payments/easytransact/configuration` enregistre la configuration d'un restaurant (manager).
+2. `POST /v1/payments/easytransact/checkout` crée un lien de paiement pour **une** commande historique ou **un** abonnement, avec une clé d'idempotence. Le montant doit égaler le total de la commande.
+3. Le fournisseur appelle `POST /v1/payments/easytransact/webhook/{restaurant_id}` : l'URL est propre à chaque restaurant pour que la base puisse établir son contexte RLS. Il n'existe pas de webhook sans identifiant de restaurant.
 
-### Scénario 9 : payer ou annuler une commande
+### Webhook sécurisé
 
-Pour payer :
+- Signature HMAC-SHA256 du corps brut obligatoire, comparée en temps constant (préfixe `sha256=` toléré). Corps limité à 1 Mo.
+- Chaque événement du fournisseur est **dédupliqué** par son identifiant.
+- Transitions d'état contrôlées : un paiement terminé ne peut pas changer de statut.
+- Un paiement `success` marque la commande payée, consomme le stock réservé et écrit une entrée `capture` dans le journal de paiement.
+- Une commande ne peut **pas** être marquée payée à la main (`PUT ... statut=payee` est refusé) : seul le webhook signé le fait.
 
-```http
-PUT /v1/restaurants/commandes/{commande_id}
-```
+### Secrets par restaurant
 
-```json
-{
-  "statut": "payee"
-}
-```
+Une configuration ne stocke pas de secret : elle stocke le **nom** de la variable d'environnement qui le contient. Pour qu'un restaurant ne puisse pas désigner une variable dont il connaît la valeur et signer de faux webhooks, seuls ces noms sont acceptés :
 
-Le système consomme le stock réservé et enregistre les mouvements de sortie.
+- jeton d'API : `EASYTRANSACT_API_TOKEN` ou `EASYTRANSACT_API_TOKEN_<SUFFIXE>` ;
+- secret de webhook : `EASYTRANSACT_WEBHOOK_SECRET` ou `EASYTRANSACT_WEBHOOK_SECRET_<SUFFIXE>`.
 
-Pour annuler :
+Seul un administrateur de la plateforme peut choisir un suffixe propre à un restaurant ; l'opérateur provisionne la variable correspondante. Le contrôle est refait à chaque usage.
 
-```json
-{
-  "statut": "annulee"
-}
-```
+### Numéros et opérateurs
 
-Le stock réservé est libéré sans être consommé.
+Les numéros doivent être camerounais (`+237`, neuf chiffres, commençant par 6). L'opérateur est déduit du plus long préfixe correspondant (MTN : 650–654, 67 ; Orange : 655–659, 69). La table des préfixes se modifie via `/v1/admin/mobile-operator-prefixes` (administrateur).
 
-### Scénario 10 : table occupée puis libérée
+## Référence de l'API
 
-Lorsqu'une commande est créée avec une table libre :
-
-1. La table passe à `occupee`.
-2. Les commandes sont suivies via `/commandes/active`.
-3. La table revient à `libre` lorsque la commande est payée ou annulée.
-
-### Scénario 11 : sauce épuisée
-
-```text
-Stock sauce tomate : 0
-```
-
-Conséquence :
-
-- les combinaisons qui exigent cette sauce disparaissent des recommandations ;
-- une tentative de commande est refusée ;
-- l'administrateur peut enregistrer une entrée de stock ou désactiver la sauce.
-
-La substitution automatique vers une autre sauce n'est pas encore implémentée : elle doit être configurée explicitement dans une future version.
-
-## API disponible
-
-Toutes les routes sont préfixées par `/v1`.
-
-### Santé
-
-| Méthode | Route | Usage |
-|---|---|---|
-| `GET` | `/` | Informations générales |
-| `GET` | `/health` | Vérification de santé |
+Toutes les routes sont préfixées par `/v1`. La colonne **Accès** résume qui peut appeler : *public*, *membre* (utilisateur connecté, restaurant vérifié), un ou plusieurs rôles d'équipe (voir [Rôles d'équipe](#rôles-déquipe)), ou *admin*. La référence exhaustive et interactive est Swagger (`/docs`).
 
 ### Authentification
 
-| Méthode | Route | Usage |
+| Méthode | Route | Accès |
 |---|---|---|
-| `POST` | `/v1/auth/register` | Créer un compte |
-| `POST` | `/v1/auth/login` | Obtenir les tokens |
-| `POST` | `/v1/auth/refresh` | Renouveler l'access token |
-| `POST` | `/v1/auth/logout` | Invalider les refresh tokens |
+| POST | `/auth/register`, `/auth/login`, `/auth/refresh` | public |
+| POST | `/auth/logout` | membre |
+| POST | `/auth/forgot-password`, `/auth/reset-password`, `/auth/verify-email` | public |
+| POST | `/auth/send-verification-email`, `/auth/send-verification-phone`, `/auth/verify-phone` | membre |
+| POST | `/auth/2fa/setup`, `/auth/2fa/confirm`, `/auth/2fa/disable`, `/auth/2fa/recovery-codes` | membre |
 
-### Utilisateurs
+### Utilisateurs et abonnements
 
-| Méthode | Route | Usage |
+| Méthode | Route | Accès |
 |---|---|---|
-| `GET` | `/v1/users` | Lister les utilisateurs |
-| `GET` | `/v1/users/me` | Voir son profil |
-| `GET` | `/v1/users/{user_id}` | Voir un utilisateur |
-| `POST` | `/v1/users` | Créer un utilisateur |
-| `PUT` | `/v1/users/{user_id}` | Modifier un utilisateur |
-| `DELETE` | `/v1/users/{user_id}` | Supprimer un utilisateur |
-
-### Abonnements
-
-| Méthode | Route | Usage |
-|---|---|---|
-| `GET` | `/v1/subscriptions/tiers` | Lister les offres |
-| `GET` | `/v1/subscriptions/tiers/{tier_id}` | Voir une offre |
-| `POST` | `/v1/subscriptions/tiers` | Créer une offre |
-| `PUT` | `/v1/subscriptions/tiers/{tier_id}` | Modifier une offre |
-| `GET` | `/v1/subscriptions/me` | Voir son abonnement |
-| `POST` | `/v1/subscriptions` | Créer un abonnement |
-| `PUT` | `/v1/subscriptions/{subscription_id}/status` | Modifier un statut |
-| `GET` | `/v1/subscriptions/{subscription_id}/balances` | Consulter les soldes |
-| `POST` | `/v1/subscriptions/{subscription_id}/reset` | Réinitialiser un solde |
+| GET | `/users/me` | membre |
+| GET, POST, PUT, DELETE | `/users`, `/users/{user_id}` | admin |
+| GET | `/subscriptions/tiers`, `/subscriptions/tiers/{tier_id}` | public |
+| POST, PUT | `/subscriptions/tiers`, `/subscriptions/tiers/{tier_id}` | admin |
+| GET | `/subscriptions/me` | membre |
+| POST | `/subscriptions`, `/subscriptions/{id}/balances`, `/subscriptions/{id}/reset` | admin |
+| GET, PUT | `/subscriptions/{id}`, `/subscriptions/{id}/status` | admin |
+| GET | `/subscriptions/{id}/balances`, `/subscriptions/{id}/balances/current` | membre du restaurant concerné |
 
 ### Transactions
 
-| Méthode | Route | Usage |
+| Méthode | Route | Accès |
 |---|---|---|
-| `POST` | `/v1/transactions` | Créer une transaction |
-| `GET` | `/v1/transactions/{transaction_id}` | Voir une transaction |
-| `GET` | `/v1/transactions/subscription/{subscription_id}` | Transactions d'un abonnement |
-| `GET` | `/v1/transactions/pos/{pos_transaction_id}` | Recherche par référence POS |
-| `GET` | `/v1/transactions/my` | Ses transactions |
+| POST | `/transactions` | caissier |
+| GET | `/transactions/pos/{pos_transaction_id}` | caissier |
+| GET | `/transactions/{id}`, `/transactions/subscription/{id}`, `/transactions/my` | membre du restaurant concerné |
 
-### Restaurant et menus
+### Restaurants, catalogue, stock
 
-| Méthode | Route | Usage |
+| Méthode | Route | Accès |
 |---|---|---|
-| `POST` | `/v1/restaurants` | Créer un restaurant |
-| `GET` | `/v1/restaurants/me` | Voir son restaurant |
-| `GET` | `/v1/restaurants/{restaurant_id}` | Voir un restaurant |
-| `PUT` | `/v1/restaurants/{restaurant_id}` | Modifier un restaurant |
-| `POST` | `/v1/restaurants/{restaurant_id}/menus` | Créer un menu |
-| `GET` | `/v1/restaurants/{restaurant_id}/menus` | Lister les menus |
-| `GET` | `/v1/restaurants/menus/{menu_id}` | Voir un menu |
-| `PUT` | `/v1/restaurants/menus/{menu_id}` | Modifier un menu |
-| `POST` | `/v1/restaurants/menus/{menu_id}/categories` | Créer une catégorie |
-| `GET` | `/v1/restaurants/menus/{menu_id}/categories` | Lister les catégories |
-| `PUT` | `/v1/restaurants/categories/{category_id}` | Modifier une catégorie |
+| POST, GET | `/restaurants`, `/restaurants/me`, `/restaurants/{id}` | membre |
+| PUT | `/restaurants/{id}` | propriétaire ou admin |
+| POST, PUT | `/restaurants/{id}/menus`, `/restaurants/menus/{id}` | manager |
+| POST, PUT | `/restaurants/menus/{id}/categories`, `/restaurants/categories/{id}` | manager |
+| POST, PUT | `/restaurants/{id}/composants`, `/restaurants/composants/{id}` | manager |
+| POST, PUT | `/restaurants/{id}/combinaisons`, `/restaurants/combinaisons/{id}` | manager |
+| POST, PUT | `/restaurants/{id}/plats`, `/restaurants/plats/{id}` | manager |
+| GET, POST, PUT, DELETE | `/restaurants/plats/{id}/composants` (nomenclature) | lecture : membre ; écriture : manager |
+| POST, PUT | `/restaurants/{id}/boissons`, `/restaurants/boissons/{id}` | manager |
+| POST | `/restaurants/{id}/tables` | manager |
+| PUT | `/restaurants/tables/{id}` | serveur, caissier, hôte, barman |
+| GET | `.../menus`, `.../composants`, `.../stock`, `.../combinaisons`, `.../combinaisons/recommandations`, `.../plats`, `.../boissons`, `.../tables`, `.../tables/free` | membre |
+| POST | `/restaurants/composants/{id}/stock/mouvements` | chef, sous-chef |
 
-### Plats, boissons et tables
+### Commandes historiques et remboursements (dépréciés)
 
-| Méthode | Route | Usage |
+| Méthode | Route | Accès |
 |---|---|---|
-| `POST` | `/v1/restaurants/{restaurant_id}/plats` | Créer un plat |
-| `GET` | `/v1/restaurants/{restaurant_id}/plats` | Lister les plats |
-| `GET` | `/v1/restaurants/plats/{plat_id}` | Voir un plat |
-| `PUT` | `/v1/restaurants/plats/{plat_id}` | Modifier un plat |
-| `POST` | `/v1/restaurants/{restaurant_id}/boissons` | Créer une boisson |
-| `GET` | `/v1/restaurants/{restaurant_id}/boissons` | Lister les boissons |
-| `GET` | `/v1/restaurants/boissons/{boisson_id}` | Voir une boisson |
-| `PUT` | `/v1/restaurants/boissons/{boisson_id}` | Modifier une boisson |
-| `POST` | `/v1/restaurants/{restaurant_id}/tables` | Créer une table |
-| `GET` | `/v1/restaurants/{restaurant_id}/tables` | Lister les tables |
-| `GET` | `/v1/restaurants/{restaurant_id}/tables/free` | Lister les tables libres |
-| `GET` | `/v1/restaurants/tables/{table_id}` | Voir une table |
-| `PUT` | `/v1/restaurants/tables/{table_id}` | Modifier une table |
+| POST, PUT | `/restaurants/{id}/commandes`, `/restaurants/commandes/{id}`, `.../items` | serveur, caissier, hôte, barman |
+| GET | `/restaurants/{id}/commandes`, `.../commandes/active`, `/restaurants/commandes/{id}`, `.../items` | membre |
+| POST | `/restaurants/commandes/{id}/refunds` | caissier |
+| GET | `/restaurants/commandes/{id}/refunds` | membre |
+| POST | `.../refunds/{refund_id}/approve`, `.../refunds/{refund_id}/reject` | manager |
 
-### Composants, combinaisons et stock
+### Moteur ROS
 
-| Méthode | Route | Usage |
+| Méthode | Route | Accès |
 |---|---|---|
-| `POST` | `/v1/restaurants/{restaurant_id}/composants` | Créer un composant |
-| `GET` | `/v1/restaurants/{restaurant_id}/composants` | Lister les composants |
-| `PUT` | `/v1/restaurants/composants/{composant_id}` | Modifier un composant |
-| `GET` | `/v1/restaurants/{restaurant_id}/stock` | Consulter le stock |
-| `POST` | `/v1/restaurants/composants/{composant_id}/stock/mouvements` | Enregistrer un mouvement |
-| `POST` | `/v1/restaurants/{restaurant_id}/combinaisons` | Créer une combinaison |
-| `GET` | `/v1/restaurants/{restaurant_id}/combinaisons` | Lister les combinaisons |
-| `GET` | `/v1/restaurants/{restaurant_id}/combinaisons/recommandations` | Recommander les offres vendables |
-| `PUT` | `/v1/restaurants/combinaisons/{combinaison_id}` | Modifier une combinaison |
+| POST | `/ros/restaurants/{id}/customers`, `.../sessions`, `.../orders` | serveur, caissier, hôte, barman |
+| GET | `/ros/restaurants/{id}/sessions` | serveur, caissier, hôte, barman |
+| POST | `/ros/restaurants/{id}/sessions/{session_id}/close` | serveur, caissier, hôte, barman |
+| GET | `/ros/restaurants/{id}/tickets/{station}` | chef, sous-chef, barman, serveur, hôte |
+| PUT | `/ros/restaurants/{id}/tickets/{ticket_id}/status` | chef, sous-chef, barman, serveur, hôte |
+| POST | `/ros/restaurants/{id}/payments`, `.../payments/split` | caissier |
+| POST | `/ros/restaurants/{id}/shifts/open`, `.../shifts/close` | caissier |
+| POST | `/ros/restaurants/{id}/sync` | serveur, caissier, hôte, barman (caissier si paiements) |
+| GET | `/ros/restaurants/{id}/procurement/suggestions` | chef, sous-chef |
+| GET | `/ros/group/reporting` | membre (restaurants dont on est propriétaire) |
+| WS | `/ros/ws/kds/{restaurant_id}/{station}` | chef, sous-chef, barman, serveur, hôte |
 
-### Commandes
+Le WebSocket s'authentifie lors de la poignée de main. Navigateur : `new WebSocket(url, ["bearer", accessToken])` (le jeton n'est jamais dans l'URL). Client non navigateur : en-tête `Authorization: Bearer ...`. Une connexion refusée reçoit une réponse HTTP `403`.
 
-| Méthode | Route | Usage |
+### Réservations
+
+| Méthode | Route | Accès |
 |---|---|---|
-| `POST` | `/v1/restaurants/{restaurant_id}/commandes` | Créer une commande |
-| `GET` | `/v1/restaurants/{restaurant_id}/commandes` | Historique paginé |
-| `GET` | `/v1/restaurants/{restaurant_id}/commandes/active` | Commandes actives |
-| `GET` | `/v1/restaurants/commandes/{commande_id}` | Voir une commande |
-| `PUT` | `/v1/restaurants/commandes/{commande_id}` | Modifier une commande |
-| `POST` | `/v1/restaurants/commandes/{commande_id}/items` | Ajouter un item |
-| `GET` | `/v1/restaurants/commandes/{commande_id}/items` | Lister les items |
+| POST, GET | `/reservations/restaurants/{id}/reservations`, `.../waitlist` | hôte, serveur, caissier |
+| GET, PUT, DELETE | `/reservations/{reservation_id}` | hôte, serveur, caissier |
+| POST | `/reservations/{id}/confirm`, `/check-in`, `/cancel` | hôte, serveur, caissier |
+| POST, DELETE | `/reservations/waitlist/{waitlist_id}/seat`, `/reservations/waitlist/{waitlist_id}` | hôte, serveur, caissier |
 
-## Catalogue composé et stock
+### Paiements et administration
 
-### Modèle métier
+| Méthode | Route | Accès |
+|---|---|---|
+| PUT | `/payments/easytransact/configuration` | manager |
+| POST | `/payments/easytransact/checkout`, `/payments/easytransact/initiate` | caissier |
+| GET | `/payments/easytransact/{payment_intent_id}/status` | membre du restaurant concerné |
+| POST | `/payments/easytransact/webhook/{restaurant_id}` | public (signature HMAC) |
+| GET, POST, PATCH | `/admin/mobile-operator-prefixes` | admin |
 
-```text
-Composant
-├── nom
-├── type
-├── prix_supplement
-├── stock_unite
-└── disponible
+## Migrations
 
-Combinaison
-├── prix
-├── menu_id
-├── disponible
-└── composants
-
-StockComposant
-├── quantite
-├── reservee
-└── seuil_alerte
-```
-
-### Règles actuelles
-
-- Un composant appartient à un restaurant.
-- Une combinaison ne peut référencer que des composants du même restaurant.
-- Le prix d'une combinaison est configuré par l'administrateur.
-- Le prix d'un supplément est lu depuis le composant.
-- Le client ne peut pas imposer `prix_unitaire`.
-- Les composants sont réservés dès l'ajout de l'item.
-- Le paiement consomme la réservation.
-- L'annulation libère la réservation.
-- Les quantités de recette sont actuellement à `1` par composant dans l'API existante.
-- Les groupes de choix, substitutions et quantités avancées restent à implémenter.
-
-## Paiements et notifications
-
-### Paiements
-
-Le service `PaymentService` expose une fabrique pour :
-
-- `cash` ;
-- `orange_money` ;
-- `mobile_money`.
-
-Les paiements sont actuellement structurés derrière des adaptateurs. La simulation locale ne constitue pas une intégration Orange Money de production.
-
-Avant une mise en production, il faut ajouter :
-
-- credentials fournisseur dans un gestionnaire de secrets ;
-- signature et validation des webhooks ;
-- idempotence par référence fournisseur ;
-- vérification de statut asynchrone ;
-- expiration des paiements en attente ;
-- remboursement ;
-- rapprochement journalier ;
-- journal d'audit.
-
-### Notifications
-
-Le service `NotificationService` prend en charge les canaux structurés :
-
-- `email` ;
-- `sms` ;
-- `whatsapp`.
-
-Templates disponibles notamment :
-
-- `commande_confirme` ;
-- `commande_prete` ;
-- `payment_confirme` ;
-- `inscription`.
-
-Les fournisseurs SMS, WhatsApp et email doivent être configurés séparément. Les templates ne remplacent pas une passerelle externe.
-
-## Migrations Alembic
-
-La base doit être gérée par Alembic en environnement partagé ou de production. Avec `SKIP_DB_INIT=true`, l'application ne tente pas de créer automatiquement les tables au démarrage.
-
-### Vérifier l'état
+La base se gère uniquement avec Alembic ; `SKIP_DB_INIT=true` empêche la création automatique des tables.
 
 ```powershell
-python -m alembic current
-python -m alembic heads
-python -m alembic history
+python -m alembic current                    # révision appliquée
+python -m alembic upgrade head               # appliquer
+python -m alembic downgrade -1               # annuler la dernière
+python -m alembic upgrade head --sql         # voir le SQL sans l'exécuter
+python -m alembic revision --autogenerate -m "description"
 ```
 
-### Appliquer les migrations
+Relire toute migration générée avant de l'appliquer. Les migrations s'exécutent avec `MIGRATION_DATABASE_URL`.
 
-```powershell
-python -m alembic upgrade head
-```
-
-### Générer une migration
-
-Après modification d'un modèle :
-
-```powershell
-python -m alembic revision --autogenerate -m "description du changement"
-```
-
-Toujours relire la migration générée avant de l'appliquer. L'autogénération ne comprend pas toutes les intentions métier.
-
-### Revenir en arrière
-
-```powershell
-python -m alembic downgrade -1
-python -m alembic downgrade <revision_id>
-```
-
-### Afficher le SQL sans exécuter
-
-```powershell
-python -m alembic upgrade head --sql
-```
-
-### Historique actuel du domaine restaurant
-
-```text
-20260914_1200  Schéma initial utilisateurs, abonnements et transactions
-20260915_1400  Restaurants, menus, plats, tables et commandes
-20260916_1000  Composants, combinaisons et suppléments
-20260916_1200  Stock, réservations et quantités de recette
-```
+| Révision | Contenu |
+|---|---|
+| `20260914_1200` | Utilisateurs, offres, abonnements, soldes, transactions, refresh tokens |
+| `20260915_1400` | Restaurants, menus, catégories, plats, boissons, tables, commandes |
+| `20260916_1000` | Composants, combinaisons, suppléments |
+| `20260916_1200` | Stock, réservations de stock, mouvements |
+| `20260924_1200` | Isolation tenant (RLS), membres, journal de paiement, préfixes d'opérateurs |
+| `20260925_1600` | Moteur ROS : clients, sessions, commandes, tickets, factures, paiements, caisse, audit |
+| `20260925_1700` | Rôles étendus, vérifications, 2FA, nomenclature des plats, remboursements, réservations, liste d'attente, suppression logique |
+| `20260926_1000` | RLS sur les tables ROS, réservations, nomenclature et remboursements |
 
 ## Tests
 
-### Tests principaux
-
 ```powershell
-python -m pytest tests/test_main.py tests/test_business_logic.py -q
+python -m pytest --ignore=tests/test_ros.py -q
 ```
 
-### Toute la suite
+174 tests, **sans base de données** : ils tournent en quelques secondes et couvrent notamment :
+
+- **Couverture des routes** : échec si une route n'a ni authentification ni garde de restaurant, ou si une action sensible (prix, remboursement, encaissement) est ouverte à un rôle trop large.
+- **Rôles** : décision d'accès pour propriétaire, manager, serveur, caissier, anciens rôles.
+- **2FA** : activation, exigence du code au login, code de secours à usage unique, secret chiffré.
+- **Secrets** : aucun jeton dans les réponses, noms de secrets de paiement restreints, webhook signé.
+- **WebSocket** : refus des connexions anonymes ou au jeton falsifié.
+- **Références croisées** : identifiants et clés d'idempotence d'un autre restaurant.
+
+### Scénarios ROS d'intégration
+
+`tests/test_ros.py` (12 scénarios) exige une base PostgreSQL migrée et **écrit dedans** : ne le lance jamais sur une base qui contient des données. Il suppose un superutilisateur (il insère ses données de départ sans contexte de restaurant, ce que la RLS refuserait au rôle applicatif). Sur une base jetable :
 
 ```powershell
-python -m pytest -q
+# 1. créer une base jetable "marinade_test" appartenant à marinade_owner (voir Démarrage rapide)
+# 2. la migrer
+$env:MIGRATION_DATABASE_URL = "postgresql://marinade_owner:...@localhost:5432/marinade_test"
+python -m alembic upgrade head
+# 3. lancer les scénarios en superutilisateur
+$env:DB_NAME="marinade_test"; $env:DB_USER="<superutilisateur>"; $env:DB_PASSWORD="..."
+python -m pytest tests/test_ros.py -q
 ```
 
-### Tests ciblés
+Adapter ce test pour qu'il respecte la RLS et la règle « jamais la base de développement » fait partie des travaux prévus. Le fichier `tests/conftest.py` fournit déjà la fixture `postgres_test_session`, qui exige `TEST_DATABASE_URL` et annule tout en fin de test.
 
-```powershell
-python -m pytest tests/test_restaurant_services.py -q
-python -m pytest -k stock -q
-python -m pytest -k combinaison -q
-```
+## Passage en production
 
-Les tests restaurant historiques nécessitent une fixture `db_session` correctement configurée et une base de test disponible. Avant de considérer la suite complète comme verte, corriger cette infrastructure de test.
+Avec `ENVIRONMENT=production` (ou `prod`, `staging`), l'application **refuse de démarrer** si :
 
-## Sécurité et production
+- `SECRET_KEY` est celle d'exemple ou fait moins de 32 caractères ;
+- `DEBUG` est actif, ou `SKIP_DB_INIT` est faux ;
+- `ALLOW_ORIGINS` est vide ou vaut `*`, ou des méthodes `*` sont combinées à des credentials ;
+- `ALLOW_LEGACY_PAYMENT_SIMULATION` ou `DEV_EXPOSE_AUTH_TOKENS` est actif ;
+- les identifiants Easy Transact ou le secret de webhook manquent ;
+- le rôle de connexion à la base est superutilisateur ou `BYPASSRLS`.
 
-### Obligatoire avant production
+À prévoir en plus (non couvert par le code) :
 
-- Remplacer la `SECRET_KEY` par une valeur aléatoire et privée.
-- Désactiver `DEBUG`.
-- Remplacer `ALLOW_ORIGINS=*` par une liste explicite.
-- Utiliser une base et des credentials dédiés à l'environnement.
-- Ne pas exposer PostgreSQL publiquement.
-- Configurer des sauvegardes et tester leur restauration.
-- Ajouter une limitation de débit sur l'authentification.
-- Valider la signature des webhooks de paiement.
-- Centraliser les logs et les identifiants de corrélation.
-- Mettre en place une politique de rotation des secrets.
-- Vérifier l'isolation propriétaire/restaurant sur toutes les routes d'écriture.
-- Tester les courses concurrentes de réservation de stock.
-
-### Limites connues
-
-Le code actuel est un socle applicatif avancé, pas encore une suite POS mondiale complète. Les éléments suivants nécessitent encore un développement dédié :
-
-- groupes de choix avec minimum et maximum ;
-- quantités de recette configurables par composant ;
-- stock des plats et boissons simples ;
-- substitutions validées par l'administrateur ;
-- vraie intégration Orange Money et autres fournisseurs ;
-- mode POS hors ligne ;
-- écran cuisine et tickets d'impression ;
-- caisse, clôture et rapprochement ;
-- livraison et commande WhatsApp complète ;
-- fidélité et CRM ;
-- comptabilité et fiscalité par pays ;
-- isolation multi-tenant complète.
+- un fournisseur réel d'e-mail et de SMS (sinon mot de passe oublié et vérifications sont inutilisables) ;
+- une limitation de débit sur l'authentification et la 2FA ;
+- `TWO_FACTOR_ENCRYPTION_KEY` dédiée, distincte de `SECRET_KEY` ;
+- HTTPS en frontal, sauvegardes de la base et test de restauration, rotation des secrets ;
+- une supervision (journaux centralisés, alertes).
 
 ## Dépannage
 
-### L'application ne démarre pas avec Python 3.14
+| Symptôme | Cause probable |
+|---|---|
+| `new row violates row-level security policy` | Le rôle connecté n'a pas de contexte de restaurant : requête hors API, ou test qui insère directement |
+| L'API répond `404` sur un restaurant qui existe | L'utilisateur n'en est ni propriétaire ni membre actif (volontaire) |
+| `400 X-Tenant-ID is required` | L'utilisateur appartient à plusieurs restaurants : envoyer `X-Tenant-ID` |
+| `403 Insufficient permissions` | Le rôle d'équipe de l'utilisateur ne fait pas partie de ceux autorisés (voir [Rôles](#rôles-déquipe)) |
+| Les tables n'existent pas | Migrations non appliquées : `python -m alembic upgrade head` |
+| `permission denied for table …` avec `marinade_app` | Les privilèges par défaut n'ont pas été accordés avant la création des tables (voir [Démarrage rapide](#2-préparer-la-base--deux-rôles-distincts)) |
+| Mot de passe oublié sans e-mail reçu | Les e-mails sont simulés ; en développement, activer `DEV_EXPOSE_AUTH_TOKENS=true` |
+| `401` avec `two_factor_required` | La 2FA est activée : ajouter `two_factor_code` au login |
+| Port 8000 occupé | `--port 8001` |
+| pgAdmin n'atteint pas PostgreSQL | Utiliser `host.docker.internal` si les deux conteneurs sont sur des réseaux Docker différents |
+| Erreur 500 à l'inscription ou à la connexion, `password cannot be longer than 72 bytes` | `bcrypt` 5 ou plus est incompatible avec `passlib 1.7.4` : `pip install -r requirements.txt` (la version `bcrypt==4.0.1` y est fixée) |
+| Erreurs d'import au lancement | Utiliser Python 3.13 et recréer le venv |
 
-Utiliser Python 3.13 et recréer l'environnement virtuel :
+## Documentation complémentaire
 
-```powershell
-deactivate
-Remove-Item -Recurse -Force .\venv
-py -3.13 -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-### Erreur de connexion PostgreSQL
-
-Vérifier :
-
-1. PostgreSQL est démarré.
-2. `DB_HOST` et `DB_PORT` sont corrects.
-3. La base `DB_NAME` existe.
-4. `DB_USER` et `DB_PASSWORD` sont valides.
-5. Le fichier `.env` est situé à la racine du projet.
-
-### La base n'est pas à jour
-
-```powershell
-python -m alembic current
-python -m alembic upgrade head
-```
-
-### Swagger retourne une erreur 401
-
-Se connecter, cliquer sur **Authorize**, puis fournir :
-
-```text
-Bearer <access_token>
-```
-
-### Une combinaison n'est pas recommandée
-
-Vérifier :
-
-- `combinaison.disponible` ;
-- `composant.disponible` ;
-- la présence d'une ligne dans `stock_composants` ;
-- la quantité disponible après réservation ;
-- l'appartenance des composants au restaurant.
-
-### Un supplément est refusé
-
-Vérifier :
-
-- l'identifiant du composant ;
-- sa disponibilité ;
-- son stock disponible ;
-- son appartenance au même restaurant que la commande.
-
-## Évolutions recommandées
-
-### Priorité 1 : fiabilité du noyau
-
-1. Ajouter une autorisation propriétaire/admin centralisée par restaurant.
-2. Exposer les quantités de recette dans les schémas API.
-3. Corriger les recommandations pour comparer le stock aux quantités réelles.
-4. Ajouter des contraintes de transition des statuts de commande.
-5. Remplacer les commits automatiques des repositories par des transactions contrôlées par les services.
-6. Ajouter des tests de concurrence et de rollback.
-
-### Priorité 2 : expérience restaurant
-
-1. Groupes de choix obligatoires et optionnels.
-2. Variantes et tailles de portions.
-3. Substitutions de composants.
-4. Menus du jour avec dates et horaires.
-5. Recettes et coûts de revient.
-6. Tickets cuisine et écran de production.
-
-### Priorité 3 : plateforme complète
-
-1. POS hors ligne.
-2. Paiements Mobile Money réels.
-3. Paiement mixte et rapprochement de caisse.
-4. Commande QR code et WhatsApp.
-5. Livraison.
-6. Fidélité, CRM et recommandations statistiques.
+- [docs/RESTAURANT_GUIDE.md](docs/RESTAURANT_GUIDE.md) : configuration d'un restaurant (horaires, menus, plats, tables). En cours d'alignement avec le moteur ROS.
+- [docs/POSITIONING_ANALYSIS.md](docs/POSITIONING_ANALYSIS.md) : analyse de positionnement face aux solutions existantes. En cours de mise à jour.
+- [.trae/documents/P0_implementation_plan.md](.trae/documents/P0_implementation_plan.md) : plan des correctifs P0.
+- [AGENTS.md](AGENTS.md) : guide pour les assistants de développement.
 
 ## Licence et contribution
 
-Avant toute publication, préciser la licence du projet et la politique de contribution.
-Les changements de schéma doivent toujours être accompagnés d'une migration Alembic et de tests métier ciblés.
+La licence et la politique de contribution restent à préciser avant toute publication. Tout changement de schéma s'accompagne d'une migration Alembic et de tests ciblés.

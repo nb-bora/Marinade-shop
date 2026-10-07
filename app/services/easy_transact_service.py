@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import hmac
-import os
 import uuid
 from typing import Any
 
@@ -25,6 +24,13 @@ from app.schemas.payment import (
 )
 from app.services.restaurant_service import CommandeService
 from app.utils.logging import get_logger
+from app.utils.payment_secrets import (
+    DEFAULT_CREDENTIAL_ENV_KEY,
+    DEFAULT_WEBHOOK_SECRET_ENV_KEY,
+    is_allowed_credential_env_key,
+    is_allowed_webhook_secret_env_key,
+    resolve_secret,
+)
 
 logger = get_logger(__name__)
 
@@ -61,8 +67,34 @@ class EasyTransactPaymentService:
             )
         return config
 
+    @staticmethod
+    def _enforce_secret_references(
+        data: PaymentConfigurationUpsert,
+        existing: PaymentConfiguration | None,
+        allow_custom_env_keys: bool,
+    ) -> None:
+        """Only a platform admin may point a restaurant at a non-default secret.
+
+        A restaurant owner may keep the default references (or those an admin
+        already set) but never choose a new one: the reference decides which
+        server-side secret authenticates that restaurant's payment webhooks.
+        """
+        if allow_custom_env_keys:
+            return
+        for field, default in (
+            ("credential_env_key", DEFAULT_CREDENTIAL_ENV_KEY),
+            ("webhook_secret_env_key", DEFAULT_WEBHOOK_SECRET_ENV_KEY),
+        ):
+            requested = getattr(data, field)
+            current = getattr(existing, field, None) if existing else None
+            if requested not in (default, current):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Only a platform administrator can change {field}",
+                )
+
     def upsert_configuration(
-        self, data: PaymentConfigurationUpsert
+        self, data: PaymentConfigurationUpsert, allow_custom_env_keys: bool = False
     ) -> PaymentConfiguration:
         config = (
             self.db.query(PaymentConfiguration)
@@ -72,6 +104,7 @@ class EasyTransactPaymentService:
             )
             .first()
         )
+        self._enforce_secret_references(data, config, allow_custom_env_keys)
         if config is None:
             config = PaymentConfiguration(
                 restaurant_id=data.restaurant_id, provider="easytransact"
@@ -82,6 +115,15 @@ class EasyTransactPaymentService:
         self.db.flush()
         self.db.refresh(config)
         return config
+
+    @staticmethod
+    def _credential_for(config: PaymentConfiguration) -> str | None:
+        if not is_allowed_credential_env_key(config.credential_env_key):
+            raise HTTPException(
+                status_code=503,
+                detail="Payment configuration references a forbidden credential",
+            )
+        return resolve_secret(config.credential_env_key)
 
     def _validate_reference(self, data: EasyTransactCheckoutCreate) -> None:
         if bool(data.commande_id) == bool(data.subscription_id):
@@ -162,7 +204,7 @@ class EasyTransactPaymentService:
         self.db.flush()
         try:
             response = EasyTransactClient.from_settings(
-                os.environ.get(config.credential_env_key)
+                self._credential_for(config)
             ).create_checkout_link(
                 description=data.description,
                 amount_xaf=data.amount_fcfa,
@@ -222,7 +264,7 @@ class EasyTransactPaymentService:
             payload["receiver_number"] = data.receiver_number
         try:
             return EasyTransactClient.from_settings(
-                os.environ.get(config.credential_env_key)
+                self._credential_for(config)
             ).initiate_transaction(payload)
         except EasyTransactError as exc:
             raise HTTPException(
@@ -235,16 +277,17 @@ class EasyTransactPaymentService:
         signature: str | None,
         config: PaymentConfiguration | None = None,
     ) -> None:
-        secret_name = (
-            config.webhook_secret_env_key
-            if config
-            else settings.EASYTRANSACT_WEBHOOK_SECRET
-        )
-        secret = (
-            os.environ.get(secret_name)
-            if config
-            else settings.EASYTRANSACT_WEBHOOK_SECRET
-        )
+        if config is not None:
+            # Revalidé à l'usage : une ancienne ligne en base ou une écriture hors
+            # API ne doit jamais pouvoir désigner une variable arbitraire.
+            if not is_allowed_webhook_secret_env_key(config.webhook_secret_env_key):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Payment configuration references a forbidden secret",
+                )
+            secret = resolve_secret(config.webhook_secret_env_key)
+        else:
+            secret = settings.EASYTRANSACT_WEBHOOK_SECRET
         if not secret or not signature:
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
         if settings.EASYTRANSACT_WEBHOOK_SIGNATURE_ALGORITHM.lower() not in {

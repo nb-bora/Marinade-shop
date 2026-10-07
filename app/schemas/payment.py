@@ -4,6 +4,10 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.utils.payment_secrets import (
+    is_allowed_credential_env_key,
+    is_allowed_webhook_secret_env_key,
+)
 from app.utils.phone import normalize_cameroon_mobile
 
 
@@ -76,6 +80,26 @@ class PaymentConfigurationUpsert(BaseModel):
     def validate_urls(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and not value.startswith("https://"):
             raise ValueError("Payment URLs must use HTTPS")
+        return value
+
+    @field_validator("credential_env_key")
+    @classmethod
+    def validate_credential_env_key(cls, value: str) -> str:
+        if not is_allowed_credential_env_key(value):
+            raise ValueError(
+                "credential_env_key must be EASYTRANSACT_API_TOKEN or "
+                "EASYTRANSACT_API_TOKEN_<SUFFIX>"
+            )
+        return value
+
+    @field_validator("webhook_secret_env_key")
+    @classmethod
+    def validate_webhook_secret_env_key(cls, value: str) -> str:
+        if not is_allowed_webhook_secret_env_key(value):
+            raise ValueError(
+                "webhook_secret_env_key must be EASYTRANSACT_WEBHOOK_SECRET or "
+                "EASYTRANSACT_WEBHOOK_SECRET_<SUFFIX>"
+            )
         return value
 
 

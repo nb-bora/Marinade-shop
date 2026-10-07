@@ -12,7 +12,10 @@ from app.core.database import Base
 from app.core.config import settings
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Migrations run as the schema owner; the application itself must not.
+config.set_main_option(
+    "sqlalchemy.url", settings.MIGRATION_DATABASE_URL or settings.DATABASE_URL
+)
 fileConfig(config.config_file_name)
 target_metadata = Base.metadata
 

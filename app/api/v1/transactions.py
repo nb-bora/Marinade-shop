@@ -4,7 +4,16 @@ from typing import List
 from app.core.database import get_db
 from app.services.transaction_service import TransactionService
 from app.schemas.transaction import TransactionResponse, TransactionCreate
-from app.api.dependencies import get_current_user, require_pos
+from app.api import permissions as perm
+from app.api.dependencies import (
+    current_tenant_id,
+    ensure_tenant_role,
+    get_current_user,
+    require_subscription_access,
+    require_transaction_access,
+)
+from app.models.subscription import Subscription
+from app.models.transaction import Transaction
 import uuid
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
@@ -30,9 +39,14 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
 )
 def create_transaction(
     transaction_data: TransactionCreate,
-    current_user=Depends(require_pos),
+    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Le restaurant vient du corps de la requête : sans ce contrôle, n'importe quel
+    # compte « pos » pouvait débiter l'abonnement d'un autre établissement.
+    ensure_tenant_role(
+        db, current_user, transaction_data.restaurant_id, perm.CASH_DESK_ROLES
+    )
     transaction_service = TransactionService(db)
     try:
         return transaction_service.create_transaction(transaction_data)
@@ -59,12 +73,12 @@ def get_subscription_transactions(
     subscription_id: uuid.UUID,
     skip: int = 0,
     limit: int = 100,
-    current_user=Depends(get_current_user),
+    subscription: Subscription = Depends(require_subscription_access),
     db: Session = Depends(get_db),
 ):
     transaction_service = TransactionService(db)
     return transaction_service.get_subscription_transactions(
-        subscription_id, skip, limit
+        subscription_id, subscription.restaurant_id, skip, limit
     )
 
 
@@ -86,11 +100,15 @@ def get_subscription_transactions(
 )
 def get_transaction_by_pos_id(
     pos_transaction_id: str,
-    current_user=Depends(require_pos),
+    current_user=Depends(perm.CASH_DESK),
     db: Session = Depends(get_db),
 ):
     transaction_service = TransactionService(db)
-    transaction = transaction_service.get_transaction_by_pos_id(pos_transaction_id)
+    # L'identifiant POS n'est unique que par restaurant : on cherche toujours dans
+    # le restaurant courant (X-Tenant-ID ou restaurant du compte).
+    transaction = transaction_service.get_transaction_by_pos_id(
+        pos_transaction_id, current_tenant_id(db)
+    )
     if not transaction:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found"
@@ -119,7 +137,9 @@ def get_my_transactions(
     db: Session = Depends(get_db),
 ):
     transaction_service = TransactionService(db)
-    return transaction_service.get_user_transactions(current_user.id, skip, limit)
+    return transaction_service.get_user_transactions(
+        current_user.id, current_tenant_id(db), skip, limit
+    )
 
 
 @router.get(
@@ -138,14 +158,8 @@ def get_my_transactions(
     },
 )
 def get_transaction(
-    transaction_id: uuid.UUID,
-    current_user=Depends(get_current_user),
-    db: Session = Depends(get_db),
+    transaction: Transaction = Depends(require_transaction_access),
 ):
-    transaction_service = TransactionService(db)
-    transaction = transaction_service.get_transaction(transaction_id)
-    if not transaction:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found"
-        )
+    # require_transaction_access répond déjà 404 si elle n'existe pas ou n'est pas
+    # visible pour l'appelant.
     return transaction

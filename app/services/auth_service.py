@@ -19,6 +19,7 @@ from app.schemas.user import (
     UserLogin,
     TwoFactorSetupResponse,
 )
+from app.utils.crypto import decrypt_secret, encrypt_secret
 from app.utils.exceptions import (
     AuthenticationError,
     ConflictError,
@@ -128,6 +129,20 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _totp_matches(secret: Optional[str], token: str) -> bool:
+    """Verify a TOTP code, treating any unusable secret as a failed check.
+
+    Legacy rows may hold a value that is not valid base32; that must read as
+    "wrong code" rather than crash the login with a 500.
+    """
+    if not secret:
+        return False
+    try:
+        return bool(_get_totp(secret).verify(token, valid_window=1))
+    except Exception:
+        return False
+
+
 def _send_notification_safe(
     db: Session,
     channel: str,
@@ -210,6 +225,15 @@ class AuthService:
             or not self.verify_password(login_data.password, user.password_hash)
         ):
             raise AuthenticationError("Invalid credentials")
+        if user.two_factor_confirmed_at is not None:
+            # Le mot de passe est déjà prouvé : révéler que la 2FA est requise
+            # n'apprend rien à un attaquant qui ne le connaît pas.
+            if not login_data.two_factor_code:
+                raise AuthenticationError(
+                    "Two-factor authentication code required",
+                    details={"two_factor_required": True},
+                )
+            self.verify_two_factor_login(user, login_data.two_factor_code)
         return user
 
     def refresh_access_token(self, refresh_token: str) -> Optional[str]:
@@ -300,6 +324,9 @@ class AuthService:
         new_hash = self.get_password_hash(new_password)
         self.user_repo.update(user, {"password_hash": new_hash})
         self.user_repo.clear_reset_token(str(user.id))
+        # Un mot de passe réinitialisé doit couper les sessions déjà ouvertes :
+        # c'est souvent la raison pour laquelle l'utilisateur le réinitialise.
+        self.refresh_token_repo.delete_by_user_id(user.id)
         logger.info(f"Password reset successful for user {user.id}")
         return True
 
@@ -424,14 +451,9 @@ class AuthService:
             )
 
         secret = _generate_random_base32(32)
-        self.user_repo.save_2fa_secret(str(user_id), secret)
+        self.user_repo.save_2fa_secret(str(user_id), encrypt_secret(secret))
 
-        raw_codes: List[str] = []
-        hashed_codes: List[str] = []
-        for _ in range(8):
-            rc = secrets.token_hex(8)
-            raw_codes.append(rc)
-            hashed_codes.append(_hash_token(rc))
+        raw_codes, hashed_codes = self._new_recovery_codes()
         self.user_repo.save_2fa_recovery_codes(str(user_id), hashed_codes)
 
         totp = _get_totp(secret)
@@ -451,14 +473,13 @@ class AuthService:
         user = self.user_repo.get(str(user_id))
         if not user:
             raise NotFoundError("User not found")
-        secret = self.user_repo.get_2fa_secret(str(user_id))
+        secret = decrypt_secret(self.user_repo.get_2fa_secret(str(user_id)))
         if not secret:
             raise BusinessLogicError("2FA setup has not been initiated")
         if user.two_factor_confirmed_at is not None:
             raise BusinessLogicError("2FA is already confirmed")
 
-        totp = _get_totp(secret)
-        if not totp.verify(token.strip(), valid_window=1):
+        if not _totp_matches(secret, token.strip()):
             raise ValidationError("Invalid 2FA token")
 
         self.user_repo.confirm_2fa_enabled(str(user_id), datetime.now(timezone.utc))
@@ -482,11 +503,9 @@ class AuthService:
             return True
 
         token = token.strip()
-        secret = self.user_repo.get_2fa_secret(str(user.id))
-        if secret:
-            totp = _get_totp(secret)
-            if totp.verify(token, valid_window=1):
-                return True
+        secret = decrypt_secret(self.user_repo.get_2fa_secret(str(user.id)))
+        if _totp_matches(secret, token):
+            return True
 
         hashed_codes = self.user_repo.get_2fa_recovery_codes(str(user.id)) or []
         given_hash = _hash_token(token)
@@ -500,6 +519,27 @@ class AuthService:
                 return True
 
         raise AuthenticationError("Invalid 2FA token or recovery code")
+
+    @staticmethod
+    def _new_recovery_codes() -> tuple[List[str], List[str]]:
+        raw_codes: List[str] = []
+        hashed_codes: List[str] = []
+        for _ in range(8):
+            code = secrets.token_hex(8)
+            raw_codes.append(code)
+            hashed_codes.append(_hash_token(code))
+        return raw_codes, hashed_codes
+
+    def regenerate_recovery_codes(self, user_id: uuid.UUID) -> List[str]:
+        user = self.user_repo.get(str(user_id))
+        if not user:
+            raise NotFoundError("User not found")
+        if not user.two_factor_confirmed_at:
+            raise BusinessLogicError("2FA is not enabled")
+        raw_codes, hashed_codes = self._new_recovery_codes()
+        self.user_repo.save_2fa_recovery_codes(str(user_id), hashed_codes)
+        logger.info(f"2FA recovery codes regenerated for user {user_id}")
+        return raw_codes
 
     def disable_two_factor(self, user_id: uuid.UUID) -> bool:
         user = self.user_repo.get(str(user_id))

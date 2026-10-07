@@ -6,9 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user, require_tenant_path, require_pos
+from app.api import permissions as perm
+from app.api.dependencies import get_current_user, require_tenant_path
 from app.core.database import get_db
 from app.models.reservation import Reservation, ReservationGuest, WaitlistEntry
+from app.models.restaurant import Table
+from app.models.ros import RosCustomer
 from app.models.user import User
 from app.schemas.reservation import (
     ReservationCreate,
@@ -28,8 +31,39 @@ from app.utils.enums import ReservationStatus
 router = APIRouter(
     prefix="/reservations",
     tags=["reservations"],
-    dependencies=[Depends(require_tenant_path), Depends(require_pos)],
+    dependencies=[Depends(require_tenant_path), Depends(perm.RESERVATION_DESK)],
 )
+
+
+def _ensure_same_restaurant(
+    db: Session,
+    restaurant_id: uuid.UUID,
+    *,
+    table_ids: tuple = (),
+    customer_id: Optional[uuid.UUID] = None,
+) -> None:
+    """Reject ids that point at ANOTHER restaurant's rows.
+
+    A foreign key only proves the row exists, not that it is the caller's. Without
+    this, a user authorized on restaurant A could attach restaurant B's table or
+    customer to a reservation by putting its UUID in the request body.
+    """
+    for table_id in table_ids:
+        if table_id is None:
+            continue
+        table = db.get(Table, table_id)
+        if table is None or table.restaurant_id != restaurant_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid table for this restaurant",
+            )
+    if customer_id is not None:
+        customer = db.get(RosCustomer, customer_id)
+        if customer is None or customer.restaurant_id != restaurant_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid customer for this restaurant",
+            )
 
 
 def _reservation_to_response(
@@ -72,6 +106,12 @@ def create_reservation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _ensure_same_restaurant(
+        db,
+        restaurant_id,
+        table_ids=(reservation_data.table_id,),
+        customer_id=reservation_data.customer_id,
+    )
     reservation = Reservation(
         restaurant_id=restaurant_id,
         table_id=reservation_data.table_id,
@@ -168,7 +208,14 @@ def update_reservation(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
         )
-    for field, value in update_data.model_dump(exclude_unset=True).items():
+    changes = update_data.model_dump(exclude_unset=True)
+    _ensure_same_restaurant(
+        db,
+        reservation.restaurant_id,
+        table_ids=(changes.get("table_id"),),
+        customer_id=changes.get("customer_id"),
+    )
+    for field, value in changes.items():
         setattr(reservation, field, value)
     db.commit()
     db.refresh(reservation)
@@ -280,6 +327,9 @@ def create_waitlist_entry(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _ensure_same_restaurant(
+        db, restaurant_id, table_ids=(waitlist_data.requested_table_id,)
+    )
     max_position = (
         db.query(WaitlistEntry)
         .filter(
@@ -342,6 +392,7 @@ def seat_waitlist_entry(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Waitlist entry not found"
         )
+    _ensure_same_restaurant(db, entry.restaurant_id, table_ids=(table_id,))
     entry.status = "SEATED"
     entry.seated_at = datetime.now(timezone.utc)
     if table_id:

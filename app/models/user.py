@@ -24,6 +24,9 @@ class User(Base):
     verification_token_expires_at = Column(DateTime(timezone=True), nullable=True)
     password_reset_token_hash = Column(String(256), nullable=True)
     password_reset_expires_at = Column(DateTime(timezone=True), nullable=True)
+    # Malgré son nom historique, cette colonne contient le secret TOTP chiffré
+    # (préfixe "enc:", voir app.utils.crypto), pas un hachage : un TOTP doit
+    # pouvoir être recalculé côté serveur.
     two_factor_secret_hash = Column(String(256), nullable=True)
     two_factor_recovery_codes_jsonb = Column(JSONB, nullable=True)
     two_factor_confirmed_at = Column(DateTime(timezone=True), nullable=True)
@@ -38,6 +41,10 @@ class User(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    @property
+    def two_factor_enabled(self) -> bool:
+        return self.two_factor_confirmed_at is not None
 
     __table_args__ = (
         CheckConstraint(

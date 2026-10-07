@@ -14,7 +14,11 @@ from app.schemas.subscription import (
     DailyBalanceCreate,
     DailyBalanceUpdate,
 )
-from app.api.dependencies import get_current_user, require_admin
+from app.api.dependencies import (
+    get_current_user,
+    require_admin,
+    require_subscription_access,
+)
 import uuid
 
 router = APIRouter(prefix="/subscriptions")
@@ -259,6 +263,7 @@ def update_subscription_status(
 # Daily Balances
 @router.get(
     "/{subscription_id}/balances",
+    dependencies=[Depends(require_subscription_access)],
     response_model=List[DailyBalanceResponse],
     tags=["subscription-balances"],
     summary="Historique des soldes quotidiens",
@@ -286,6 +291,7 @@ def get_subscription_balances(
 
 @router.get(
     "/{subscription_id}/balances/current",
+    dependencies=[Depends(require_subscription_access)],
     response_model=DailyBalanceResponse,
     tags=["subscription-balances"],
     summary="Solde quotidien courant",

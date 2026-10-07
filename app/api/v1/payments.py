@@ -6,10 +6,11 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
+from app.api import permissions as perm
 from app.api.dependencies import (
+    ensure_tenant_role,
     get_current_user,
     require_payment_intent_access,
-    require_restaurant_access,
     set_db_context,
 )
 from app.core.config import settings
@@ -35,8 +36,14 @@ def upsert_configuration(
     db: Session = Depends(get_db),
 ):
     try:
-        require_restaurant_access(data.restaurant_id, current_user, db)
-        return EasyTransactPaymentService(db).upsert_configuration(data)
+        # Seul le management d'un restaurant (ou un admin plateforme) change sa
+        # configuration de paiement ; un serveur ou un caissier ne le peut pas.
+        ensure_tenant_role(
+            db, current_user, data.restaurant_id, perm.MANAGEMENT_ROLES
+        )
+        return EasyTransactPaymentService(db).upsert_configuration(
+            data, allow_custom_env_keys=current_user.role == "admin"
+        )
     except HTTPException:
         raise
     except ValueError as exc:
@@ -51,7 +58,7 @@ def create_checkout(
     db: Session = Depends(get_db),
 ):
     try:
-        require_restaurant_access(data.restaurant_id, current_user, db)
+        ensure_tenant_role(db, current_user, data.restaurant_id, perm.CASH_DESK_ROLES)
         intent = EasyTransactPaymentService(db).create_checkout(data)
         response.status_code = (
             status.HTTP_201_CREATED
@@ -72,7 +79,7 @@ def initiate_transaction(
     db: Session = Depends(get_db),
 ):
     try:
-        require_restaurant_access(data.restaurant_id, current_user, db)
+        ensure_tenant_role(db, current_user, data.restaurant_id, perm.CASH_DESK_ROLES)
         return EasyTransactPaymentService(db).initiate(data)
     except HTTPException:
         raise
@@ -116,12 +123,3 @@ async def webhook(
     if intent.restaurant_id != restaurant_id:
         raise HTTPException(status_code=404, detail="Payment intent not found")
     return {"accepted": True, "duplicate": duplicate, "status": intent.status}
-
-
-# Kept as an explicit rejection rather than an unscoped webhook. A provider must
-# call the tenant-specific URL so the database can establish RLS context.
-@router.post("/webhook", response_model=EasyTransactWebhookResponse)
-async def unscoped_webhook(request: Request):
-    raise HTTPException(
-        status_code=400, detail="A tenant-specific webhook URL is required"
-    )

@@ -190,7 +190,6 @@ class EmailNotification(NotificationChannel):
         import time
         import uuid
 
-        time.sleep(0.3)  # Simulation de délai réseau
 
         return {
             "success": True,
@@ -306,7 +305,6 @@ class SMSNotification(NotificationChannel):
         import time
         import uuid
 
-        time.sleep(0.5)  # Simulation de délai réseau
 
         return {
             "success": True,
@@ -422,7 +420,6 @@ class WhatsAppNotification(NotificationChannel):
         import time
         import uuid
 
-        time.sleep(0.6)  # Simulation de délai réseau
 
         return {
             "success": True,

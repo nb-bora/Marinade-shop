@@ -6,13 +6,44 @@ from app.api.exception_handlers import (
     marinade_exception_handler,
     general_exception_handler,
 )
-from app.core.database import get_engine, Base
+from app.core.database import (
+    Base,
+    database_role_bypasses_rls,
+    get_engine,
+    get_session_local,
+)
 from app.core.config import settings
 from app.utils.logging import get_logger
 from app.utils.exceptions import MarinadeException
 import app.models  # register every model with SQLAlchemy metadata
 
 logger = get_logger(__name__)
+
+
+def _check_row_level_security_is_effective() -> None:
+    """Refuse to serve production traffic through a role that ignores RLS.
+
+    A superuser (or BYPASSRLS role) silently bypasses every tenant policy, so the
+    isolation guaranteed by the migrations would be fictional. Elsewhere this is
+    only a warning so local development with the default postgres role keeps working.
+    """
+    try:
+        with get_session_local()() as db:
+            bypasses = database_role_bypasses_rls(db)
+    except Exception as exc:
+        logger.error(f"Could not verify the database role privileges: {exc}")
+        return
+    if not bypasses:
+        return
+    message = (
+        "The application database role is a superuser or has BYPASSRLS, so "
+        "tenant isolation (row level security) is NOT enforced. Connect with a "
+        "dedicated role (NOSUPERUSER NOBYPASSRLS, not the table owner) and run "
+        "Alembic with MIGRATION_DATABASE_URL."
+    )
+    if settings.is_production:
+        raise RuntimeError(message)
+    logger.warning(message)
 
 
 @asynccontextmanager
@@ -31,6 +62,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Could not create database tables: {e}")
         logger.info("Please run Alembic migrations instead: alembic upgrade head")
+
+    _check_row_level_security_is_effective()
 
     yield
 
