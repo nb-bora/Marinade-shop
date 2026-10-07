@@ -174,7 +174,7 @@ Le fichier `.env` est ignoré par git. Toutes les variables sont décrites dans 
 
 ```powershell
 python -m alembic upgrade head
-python -m alembic current      # doit afficher 20260927_1100 (head)
+python -m alembic current      # doit afficher 20260928_1100 (head)
 ```
 
 Alembic utilise `MIGRATION_DATABASE_URL` si elle est définie, sinon la connexion de l'application.
@@ -629,6 +629,25 @@ Les routes `/v1/restaurants/.../commandes` (modèle `Commande`) sont marquées `
 2. `POST /v1/payments/easytransact/checkout` crée un lien de paiement pour **une** commande historique ou **un** abonnement, avec une clé d'idempotence. Le montant doit égaler le total de la commande.
 3. Le fournisseur appelle `POST /v1/payments/easytransact/webhook/{restaurant_id}` : l'URL est propre à chaque restaurant pour que la base puisse établir son contexte RLS. Il n'existe pas de webhook sans identifiant de restaurant.
 
+### Références uniques par restaurant
+
+La passerelle ne garde qu'une chose de chaque paiement : la `vendor_reference` (100 caractères au plus). Toute l'attribution des transactions repose donc sur elle. Chaque restaurant reçoit **à la création de sa configuration** un préfixe unique sur la plateforme (`MRD-` + 8 caractères sans ambiguïté, par ex. `MRD-7KQ2XA9P`), que ni lui ni le client ne peuvent choisir ni modifier. Chaque paiement porte `{préfixe}-{AAAAMMJJ}-{12 caractères aléatoires}` : filtrer la liste de la passerelle sur le préfixe isole les transactions d'un restaurant.
+
+### Historique des transactions
+
+Les transactions sont lues dans la base de Marinade, jamais chez la passerelle : la réponse ne dépend ni du réseau ni du volume total. Réservé à la caisse et au management.
+
+- `GET /v1/payments/easytransact/transactions` : les plus récentes d'abord, pagination par curseur (`next_cursor` à renvoyer dans `?cursor=`), filtres `status`, `from`, `to`, `reference` (début de référence), `commande_id`. Chaque page coûte une descente d'index plus `limit` lignes, à la page 1 comme à la page 500.
+- `GET .../transactions/summary` : totaux par statut, montant net à recevoir (frais déduits).
+- `GET .../transactions/{id}` : détail et historique des statuts.
+- `POST .../transactions/{id}/refresh` : redemande son statut à la passerelle quand le webhook n'est jamais arrivé ; le résultat suit le chemin du webhook.
+
+Mesures sur un restaurant de 20 000 transactions parmi 400 000 (rôle applicatif, RLS active) : première page 0,2 ms, page profonde 0,3 ms, recherche par préfixe de référence environ 2 ms.
+
+### Politiques RLS et plan d'exécution
+
+Une politique écrite `app_is_platform_admin() OR restaurant_id = app_current_tenant_id()` appelle ses fonctions pour chaque ligne candidate. Le planificateur sous-estime alors les lignes et, dès qu'un curseur s'ajoute, remplace le parcours ordonné de l'index par un Bitmap Scan suivi d'un tri (13 ms pour 20 000 lignes, linéaire ensuite). La migration `20260928_1100` enveloppe ces appels dans `(SELECT ...)` : ils sont évalués une fois (InitPlan) et la même requête repasse à 0,3 ms. Le sens des politiques est inchangé. Corollaire : sous RLS, `LIKE` et la comparaison de lignes ne sont pas des opérateurs « leakproof » et ne peuvent pas servir de condition d'index ; la recherche par préfixe utilise donc un intervalle (`>=` et `<`), le `LIKE` ne servant que de garde-fou.
+
 ### Webhook sécurisé
 
 - Signature HMAC-SHA256 du corps brut obligatoire, comparée en temps constant (préfixe `sha256=` toléré). Corps limité à 1 Mo.
@@ -746,7 +765,9 @@ Le WebSocket s'authentifie lors de la poignée de main. Navigateur : `new WebSoc
 |---|---|---|
 | PUT | `/payments/easytransact/configuration` | manager |
 | POST | `/payments/easytransact/checkout`, `/payments/easytransact/initiate` | caissier |
-| GET | `/payments/easytransact/{payment_intent_id}/status` | membre du restaurant concerné |
+| GET | `/payments/easytransact/transactions`, `/transactions/summary`, `/transactions/{id}` | caissier, manager |
+| POST | `/payments/easytransact/transactions/{id}/refresh` | caissier, manager |
+| GET | `/payments/easytransact/{payment_intent_id}/status` | caissier, manager |
 | POST | `/payments/easytransact/webhook/{restaurant_id}` | public (signature HMAC) |
 | GET, POST, PATCH | `/admin/mobile-operator-prefixes` | admin |
 
@@ -776,6 +797,8 @@ Relire toute migration générée avant de l'appliquer. Les migrations s'exécut
 | `20260926_1000` | RLS sur les tables ROS, réservations, nomenclature et remboursements |
 | `20260927_1000` | Index composites des requêtes chaudes, index manquants (`daily_balances`, `ros_invoices.order_id`) |
 | `20260927_1100` | Boisson liée à un composant de stock, opérateur sur les encaissements, contrainte `réservé ≤ quantité` |
+| `20260928_1000` | Préfixe de référence unique par restaurant, frais et date de fin des paiements, index d'historique |
+| `20260928_1100` | Politiques RLS évaluées une fois par requête (InitPlan) |
 
 ## Tests
 
@@ -783,7 +806,7 @@ Relire toute migration générée avant de l'appliquer. Les migrations s'exécut
 python -m pytest --ignore=tests/test_ros.py -q
 ```
 
-190 tests, **sans base de données** : ils tournent en quelques secondes et couvrent notamment :
+209 tests, **sans base de données** : ils tournent en quelques secondes et couvrent notamment :
 
 - **Couverture des routes** : échec si une route n'a ni authentification ni garde de restaurant, ou si une action sensible (prix, remboursement, encaissement) est ouverte à un rôle trop large.
 - **Rôles** : décision d'accès pour propriétaire, manager, serveur, caissier, anciens rôles.
@@ -801,6 +824,7 @@ Ces suites appellent l'API contre PostgreSQL avec le **rôle applicatif**, donc 
 | `tests/test_api_integration.py` | 47 | Toutes les routes, l'isolation entre restaurants, les droits par rôle, la 2FA |
 | `tests/test_query_budget.py` | 12 | Nombre de requêtes constant, pagination bornée, recommandations évaluées par la base |
 | `tests/test_stock_and_payment_consistency.py` | 40 | Cycle de vie du stock, remboursements, prix serveur, encaissements, caisse, synchronisation, concurrence |
+| `tests/test_payment_history.py` | 28 | Historique par restaurant, curseur, filtres, résumé, rafraîchissement, isolation entre restaurants |
 | `tests/test_rls_audit.py` | 13 | RLS forcée partout, politiques complètes, isolement vérifié table par table |
 
 Elles s'ignorent sans `TEST_DATABASE_URL`. Cette URL doit viser une base **jetable** (le nom contient `test`), migrée à la dernière révision, avec le rôle applicatif. Les requêtes sont validées comme en production : les données restent dans cette base.
@@ -809,7 +833,7 @@ Elles s'ignorent sans `TEST_DATABASE_URL`. Cette URL doit viser une base **jetab
 # 1. créer la base jetable et la migrer (voir Démarrage rapide, avec marinade_test comme nom)
 # 2. lancer
 $env:TEST_DATABASE_URL = "postgresql://marinade_app:...@localhost:5432/marinade_test"
-python -m pytest tests/test_api_integration.py tests/test_query_budget.py tests/test_stock_and_payment_consistency.py tests/test_rls_audit.py -q
+python -m pytest tests/test_api_integration.py tests/test_query_budget.py tests/test_stock_and_payment_consistency.py tests/test_payment_history.py tests/test_rls_audit.py -q
 ```
 
 ### Scénarios ROS d'intégration

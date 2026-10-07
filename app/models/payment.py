@@ -1,5 +1,6 @@
 from sqlalchemy import (
     Boolean,
+    Numeric,
     CheckConstraint,
     Column,
     DateTime,
@@ -31,7 +32,9 @@ class PaymentConfiguration(Base):
     webhook_url = Column(String(500), nullable=True)
     success_url = Column(String(500), nullable=True)
     failure_url = Column(String(500), nullable=True)
-    vendor_reference_prefix = Column(String(30), nullable=False, default="MRD")
+    # Attribue par le serveur, unique sur toute la plateforme, jamais modifiable
+    # par le client : voir app/utils/payment_references.py
+    vendor_reference_prefix = Column(String(30), nullable=False)
     provider_account_ref = Column(String(255), nullable=True)
     credential_env_key = Column(
         String(255), nullable=False, server_default="EASYTRANSACT_API_TOKEN"
@@ -56,6 +59,15 @@ class PaymentConfiguration(Base):
             "restaurant_id", "provider", name="uq_restaurant_payment_provider"
         ),
         CheckConstraint("service_code <> ''", name="check_payment_service_code"),
+        CheckConstraint(
+            "vendor_reference_prefix ~ '^[A-Z0-9][A-Z0-9-]{2,29}$'",
+            name="check_payment_reference_prefix",
+        ),
+        Index(
+            "uq_payment_configuration_reference_prefix",
+            "vendor_reference_prefix",
+            unique=True,
+        ),
     )
 
 
@@ -88,6 +100,11 @@ class PaymentIntent(Base):
     checkout_url = Column(Text, nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)
     metadata_jsonb = Column(JSONB, nullable=True)
+    # Communiques par la passerelle : inconnus (NULL) tant qu'elle ne les a pas donnes.
+    fees_fcfa = Column(Numeric(14, 2), nullable=True)
+    fees_inclusive = Column(Boolean, nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    failure_reason = Column(Text, nullable=True)
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -99,6 +116,24 @@ class PaymentIntent(Base):
     )
 
     __table_args__ = (
+        Index(
+            "idx_payment_intent_restaurant_created",
+            "restaurant_id",
+            created_at.desc(),
+            id.desc(),
+        ),
+        Index(
+            "idx_payment_intent_restaurant_status_created",
+            "restaurant_id",
+            "status",
+            created_at.desc(),
+            id.desc(),
+        ),
+        Index(
+            "idx_payment_intent_restaurant_reference",
+            "restaurant_id",
+            "vendor_reference",
+        ),
         UniqueConstraint("vendor_reference", name="uq_payment_vendor_reference"),
         UniqueConstraint(
             "restaurant_id", "idempotency_key", name="uq_payment_tenant_idempotency"

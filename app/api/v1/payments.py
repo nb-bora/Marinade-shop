@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.api import permissions as perm
 from app.api.dependencies import (
+    current_tenant_id,
     ensure_tenant_role,
     get_current_user,
     require_payment_intent_access,
@@ -23,6 +26,10 @@ from app.schemas.payment import (
     PaymentConfigurationResponse,
     PaymentConfigurationUpsert,
     PaymentIntentResponse,
+    PaymentSummaryResponse,
+    PaymentTransactionDetail,
+    PaymentTransactionPage,
+    PaymentTransactionResponse,
 )
 from app.services.easy_transact_service import EasyTransactPaymentService
 
@@ -87,16 +94,126 @@ def initiate_transaction(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _restaurant_of_request(
+    db: Session, user, restaurant_id: Optional[uuid.UUID]
+) -> uuid.UUID:
+    """Restaurant dont on lit les transactions : `restaurant_id`, sinon celui de la
+    requete (X-Tenant-ID ou restaurant du compte). Reserve a la caisse et au management :
+    les transactions sont de l'argent."""
+    restaurant_id = restaurant_id or current_tenant_id(db)
+    if restaurant_id is None:
+        raise HTTPException(
+            status_code=400, detail="restaurant_id (or X-Tenant-ID) is required"
+        )
+    ensure_tenant_role(db, user, restaurant_id, perm.CASH_DESK_ROLES)
+    return restaurant_id
+
+
+def _intent_for_cash_desk(
+    db: Session, user, payment_intent_id: uuid.UUID
+) -> PaymentIntent:
+    intent = require_payment_intent_access(payment_intent_id, user, db)
+    ensure_tenant_role(db, user, intent.restaurant_id, perm.CASH_DESK_ROLES)
+    return intent
+
+
+@router.get(
+    "/transactions",
+    response_model=PaymentTransactionPage,
+    summary="Mes transactions (les plus récentes d'abord)",
+    description=(
+        "Lu dans la base de Marinade, jamais chez la passerelle : la réponse ne dépend "
+        "ni du réseau ni du nombre total de transactions. Pagination par curseur : "
+        "renvoyer `next_cursor` dans `?cursor=` pour la page suivante."
+    ),
+)
+def list_transactions(
+    restaurant_id: Optional[uuid.UUID] = None,
+    statuses: Optional[List[str]] = Query(None, alias="status"),
+    date_from: Optional[datetime] = Query(None, alias="from"),
+    date_to: Optional[datetime] = Query(None, alias="to"),
+    reference: Optional[str] = Query(
+        None, max_length=100, description="Début de référence (ex. le préfixe du restaurant)"
+    ),
+    commande_id: Optional[uuid.UUID] = None,
+    cursor: Optional[str] = Query(None, max_length=300),
+    limit: int = Query(50, ge=1, le=200),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    restaurant_id = _restaurant_of_request(db, current_user, restaurant_id)
+    service = EasyTransactPaymentService(db)
+    items, next_cursor = service.list_transactions(
+        restaurant_id,
+        statuses=statuses,
+        since=date_from,
+        until=date_to,
+        reference=reference,
+        commande_id=commande_id,
+        cursor=cursor,
+        limit=limit,
+    )
+    return {"items": [service.view(i) for i in items], "next_cursor": next_cursor}
+
+
+@router.get(
+    "/transactions/summary",
+    response_model=PaymentSummaryResponse,
+    summary="Totaux de mes transactions par statut",
+)
+def transactions_summary(
+    restaurant_id: Optional[uuid.UUID] = None,
+    date_from: Optional[datetime] = Query(None, alias="from"),
+    date_to: Optional[datetime] = Query(None, alias="to"),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    restaurant_id = _restaurant_of_request(db, current_user, restaurant_id)
+    return EasyTransactPaymentService(db).summarize(
+        restaurant_id, since=date_from, until=date_to
+    )
+
+
+@router.get(
+    "/transactions/{payment_intent_id}",
+    response_model=PaymentTransactionDetail,
+    summary="Détail d'une transaction et historique de ses statuts",
+)
+def get_transaction(
+    payment_intent_id: uuid.UUID,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    intent = _intent_for_cash_desk(db, current_user, payment_intent_id)
+    return EasyTransactPaymentService(db).transaction_detail(intent)
+
+
+@router.post(
+    "/transactions/{payment_intent_id}/refresh",
+    response_model=PaymentTransactionResponse,
+    summary="Redemander son statut à la passerelle",
+    description=(
+        "Pour un paiement dont le webhook n'est jamais arrivé. Le résultat suit le même "
+        "chemin que le webhook ; en cas d'erreur de la passerelle, rien n'est modifié."
+    ),
+)
+def refresh_transaction(
+    payment_intent_id: uuid.UUID,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    intent = _intent_for_cash_desk(db, current_user, payment_intent_id)
+    service = EasyTransactPaymentService(db)
+    return service.view(service.refresh_from_gateway(intent))
+
+
 @router.get("/{payment_intent_id}/status", response_model=PaymentIntentResponse)
 def get_payment_status(
     payment_intent_id: uuid.UUID,
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    intent: PaymentIntent = require_payment_intent_access(
-        payment_intent_id, current_user, db
-    )
-    return intent
+    return _intent_for_cash_desk(db, current_user, payment_intent_id)
 
 
 @router.post("/webhook/{restaurant_id}", response_model=EasyTransactWebhookResponse)

@@ -1,5 +1,6 @@
 from datetime import datetime
-from typing import Literal, Optional
+from decimal import Decimal
+from typing import Dict, List, Literal, Optional
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -63,9 +64,6 @@ class PaymentConfigurationUpsert(BaseModel):
     webhook_url: Optional[str] = Field(None, max_length=500)
     success_url: Optional[str] = Field(None, max_length=500)
     failure_url: Optional[str] = Field(None, max_length=500)
-    vendor_reference_prefix: str = Field(
-        "MRD", min_length=2, max_length=30, pattern=r"^[A-Za-z0-9_-]+$"
-    )
     provider_account_ref: Optional[str] = Field(None, max_length=255)
     credential_env_key: str = Field(
         "EASYTRANSACT_API_TOKEN", min_length=3, max_length=255
@@ -162,3 +160,62 @@ class EasyTransactWebhookResponse(BaseModel):
     accepted: bool
     duplicate: bool = False
     status: Optional[str] = None
+
+
+class PaymentTransactionResponse(BaseModel):
+    """Une transaction du restaurant, telle que lue dans NOTRE base (donc instantanee)."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    restaurant_id: uuid.UUID
+    reference: str = Field(description="Référence envoyée à Easy Transact (vendor_reference)")
+    status: str
+    amount_fcfa: int
+    currency: str
+    fees_fcfa: Optional[Decimal] = None
+    net_amount_fcfa: Optional[Decimal] = Field(
+        None, description="Ce que le restaurant reçoit ; inconnu tant que les frais ne le sont pas"
+    )
+    commande_id: Optional[uuid.UUID] = None
+    subscription_id: Optional[uuid.UUID] = None
+    provider_transaction_id: Optional[str] = None
+    failure_reason: Optional[str] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+
+class PaymentTransactionPage(BaseModel):
+    items: List[PaymentTransactionResponse]
+    next_cursor: Optional[str] = Field(
+        None, description="À renvoyer tel quel (?cursor=) pour la page suivante ; vide en fin de liste"
+    )
+
+
+class PaymentEventResponse(BaseModel):
+    status: str
+    received_at: datetime
+    processed_at: Optional[datetime] = None
+
+
+class PaymentTransactionDetail(PaymentTransactionResponse):
+    checkout_url: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    events: List[PaymentEventResponse] = []
+
+
+class PaymentStatusTotal(BaseModel):
+    count: int
+    amount_fcfa: int
+
+
+class PaymentSummaryResponse(BaseModel):
+    since: Optional[datetime] = None
+    until: Optional[datetime] = None
+    currency: str = "XAF"
+    transactions: int
+    by_status: Dict[str, PaymentStatusTotal]
+    collected_fcfa: int = Field(description="Total des paiements réussis")
+    fees_fcfa: Decimal = Field(description="Frais connus des paiements réussis")
+    net_collected_fcfa: Decimal = Field(
+        description="Encaissé moins les frais déduits ; les frais encore inconnus ne sont pas déduits"
+    )
