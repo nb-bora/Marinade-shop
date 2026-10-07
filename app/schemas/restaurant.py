@@ -150,6 +150,12 @@ class StockMouvementCreate(BaseModel):
     notes: Optional[str] = None
 
 
+class StockSeuilUpdate(BaseModel):
+    # Sous ce niveau, une sortie de stock journalise une alerte et le composant
+    # apparait dans les propositions d'approvisionnement.
+    seuil_alerte: Decimal = Field(..., ge=0)
+
+
 class CombinaisonBase(BaseModel):
     nom: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
@@ -259,6 +265,10 @@ class BoissonBase(BaseModel):
     disponible: bool = True
     category: Optional[str] = Field(None, max_length=50)
     attributs_jsonb: Optional[dict] = None
+    # Stock : composant consommé à chaque vente (ex. « Bière Castel 65cl » en
+    # bouteilles). Sans lien, la boisson ne consomme aucun stock.
+    composant_id: Optional[uuid.UUID] = None
+    stock_par_vente: Decimal = Field(default=1, gt=0)
 
 
 class BoissonCreate(BoissonBase):
@@ -274,6 +284,8 @@ class BoissonUpdate(BaseModel):
     disponible: Optional[bool] = None
     category: Optional[str] = Field(None, max_length=50)
     attributs_jsonb: Optional[dict] = None
+    composant_id: Optional[uuid.UUID] = None
+    stock_par_vente: Optional[Decimal] = Field(None, gt=0)
 
 
 class BoissonResponse(BoissonBase):
@@ -374,6 +386,9 @@ class CommandeRefundCreate(BaseModel):
     montant: Decimal = Field(..., gt=0)
     raison: str = Field(..., min_length=1, max_length=500)
     item_ids: Optional[List[uuid.UUID]] = Field(None, min_length=1)
+    # Un plat prepare ne retourne pas en rayon : le stock n'est remis que si le
+    # manager le demande, et seulement pour les articles listes dans item_ids.
+    remettre_en_stock: bool = False
 
 
 class CommandeRefundResponse(BaseModel):
@@ -387,6 +402,7 @@ class CommandeRefundResponse(BaseModel):
     traite_par_id: Optional[uuid.UUID] = None
     traite_le: Optional[datetime] = None
     item_ids: List[uuid.UUID] = []
+    remettre_en_stock: bool = False
     created_at: datetime
     updated_at: datetime
 

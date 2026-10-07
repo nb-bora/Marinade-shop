@@ -152,6 +152,17 @@ class RosInvoiceRepository(BaseRepository[RosInvoice]):
     def get_by_order(self, order_id: UUID) -> Optional[RosInvoice]:
         return self.db.query(RosInvoice).filter(RosInvoice.order_id == order_id).first()
 
+    def get_for_update(self, invoice_id: UUID) -> Optional[RosInvoice]:
+        """Facture verrouillee jusqu'a la fin de la transaction, relue apres l'attente
+        du verrou (populate_existing) pour ne pas calculer sur un montant perime."""
+        return (
+            self.db.query(RosInvoice)
+            .filter(RosInvoice.id == invoice_id)
+            .with_for_update()
+            .populate_existing()
+            .first()
+        )
+
 
 class RosPaymentRepository(BaseRepository[RosPaymentTransaction]):
     def __init__(self, db: Session):

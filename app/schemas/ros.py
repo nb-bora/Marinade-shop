@@ -62,11 +62,15 @@ class SessionResponse(BaseModel):
 
 # ORDER SCHEMAS
 class OrderItemCreate(BaseModel):
+    # Article du catalogue (plat, combinaison, boisson) : le serveur impose le nom, le
+    # prix et la TVA du catalogue, et ignore product_name / unit_price / tax_rate.
+    # Article libre (sans product_id) : product_name et unit_price sont requis et
+    # l'appel est réservé au management.
     product_id: Optional[UUID] = None
-    product_name: str
+    product_name: Optional[str] = Field(None, min_length=1, max_length=255)
     quantity: int = Field(gt=0, description="Quantité doit être > 0")
-    unit_price: Decimal = Field(ge=0, description="Prix doit être >= 0")
-    tax_rate: Decimal = Decimal("19.25")
+    unit_price: Optional[Decimal] = Field(None, ge=0, description="Prix des articles libres")
+    tax_rate: Decimal = Field(Decimal("19.25"), ge=0, le=100)
     destination_station: ProductionStation = ProductionStation.KITCHEN
     notes: Optional[str] = None
     details_jsonb: Optional[Dict[str, Any]] = None

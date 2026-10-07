@@ -46,6 +46,16 @@ class BusinessLogicError(MarinadeException):
     pass
 
 
+class InsufficientStockError(ConflictError):
+    """Le stock libre ne couvre pas la demande (réponse 409, rien n'est consommé).
+
+    ``details`` liste chaque composant en défaut : identifiant, nom, quantité
+    requise et quantité disponible.
+    """
+
+    pass
+
+
 class DatabaseError(MarinadeException):
     """Database related errors"""
 

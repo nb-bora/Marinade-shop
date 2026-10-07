@@ -29,6 +29,7 @@ from app.schemas.restaurant import (
     ComposantUpdate,
     StockComposantResponse,
     StockMouvementCreate,
+    StockSeuilUpdate,
     CombinaisonResponse,
     CombinaisonCreate,
     CombinaisonUpdate,
@@ -510,6 +511,22 @@ def get_restaurant_stock(
     db: Session = Depends(get_db),
 ):
     return StockService(db).get_restaurant_stock(restaurant_id, page.skip, page.limit)
+
+
+@router.put(
+    "/composants/{composant_id}/stock/seuil",
+    dependencies=[Depends(perm.STOCK_KEEPING)],
+    response_model=StockComposantResponse,
+    tags=["restaurant-stock"],
+    summary="Définir le seuil d'alerte d'un composant",
+    description="Sous ce seuil, une sortie de stock journalise une alerte et le composant est proposé à l'approvisionnement.",
+)
+def set_stock_threshold(
+    composant_id: uuid.UUID,
+    data: StockSeuilUpdate,
+    db: Session = Depends(get_db),
+):
+    return StockService(db).set_threshold(composant_id, data.seuil_alerte)
 
 
 @router.post(
@@ -1375,6 +1392,7 @@ def _refund_out(refund, restaurant_id: uuid.UUID) -> CommandeRefundResponse:
         traite_par_id=refund.processed_by,
         traite_le=refund.processed_at,
         item_ids=[uuid.UUID(i) for i in notes.get("items_refund", [])],
+        remettre_en_stock=bool(notes.get("restock", False)),
         created_at=refund.created_at,
         updated_at=refund.updated_at,
     )
@@ -1419,6 +1437,7 @@ def request_refund(
             reason=refund_data.raison,
             items_refund=refund_data.item_ids,
             initiated_by=current_user.id,
+            restock=refund_data.remettre_en_stock,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

@@ -13,6 +13,7 @@ Marinade est une API FastAPI qui réunit, pour un restaurant, ce que l'on achèt
 - [Démarrage rapide](#démarrage-rapide)
 - [Configuration](#configuration)
 - [Architecture](#architecture)
+- [Performance et complexité](#performance-et-complexité)
 - [Multi-tenant et sécurité](#multi-tenant-et-sécurité)
 - [Authentification](#authentification)
 - [Rôles d'équipe](#rôles-déquipe)
@@ -46,14 +47,14 @@ La comparaison porte sur des catégories d'outils (caisses restaurant type Toast
 |---|---|
 | FCFA, TVA 19,25 %, numéros camerounais | Disponible |
 | Orange Money et MTN via Easy Transact (webhook signé, journal) | Disponible pour les commandes historiques et les abonnements ; **pas encore relié au moteur ROS** |
-| Catalogue composable, suppléments, stock réservé | Disponible, avec des corrections de stock à venir |
+| Catalogue composable, suppléments, stock réservé, boissons suivies en stock | Disponible, testé de bout en bout |
 | Isolation par restaurant (API + RLS PostgreSQL) | Disponible et vérifiée |
 | Rôles d'équipe granulaires | Disponible |
 | 2FA (TOTP et codes de secours) | Disponible |
 | Tickets cuisine/bar, caisse avec écart, factures, synchronisation hors ligne | Disponible via l'API ROS |
 | Réservations et liste d'attente | Partiel (voir limites) |
 | Alertes et rappels par SMS / WhatsApp | Canaux simulés, aucun envoi réel |
-| Prix calculés côté serveur | Disponible pour les commandes historiques ; **le moteur ROS accepte encore le prix envoyé par la caisse** |
+| Prix calculés côté serveur | Disponible, commandes historiques **et** moteur ROS (un prix libre est réservé au management) |
 
 ## État d'avancement et limites connues
 
@@ -65,7 +66,10 @@ Aucune ligne ci-dessous n'est cachée : ce sont les écarts constatés à la lec
 - **Authentification** : JWT, rotation des refresh tokens, 2FA réelle branchée sur le login, aucun secret de vérification dans les réponses HTTP.
 - **Rôles d'équipe** appliqués sur les routes sensibles : un serveur ne change ni un prix ni un remboursement, et n'encaisse pas.
 - **Scénarios ROS de bout en bout** : 12 scénarios passent sur une vraie base (commande avec ou sans table, tickets, paiement, encaissement partagé, caisse avec écart, synchronisation hors ligne, stock, isolation).
-- **Parcours complet par l'API avec le rôle applicatif sous RLS réelle** : 47 tests d'intégration couvrent l'inscription, la 2FA, le catalogue, la nomenclature des plats, la commande ROS jusqu'à l'encaissement et la clôture de session, les réservations, les remboursements, les abonnements, les transactions, les paiements, l'administration, l'isolation entre restaurants et les droits par rôle.
+- **Parcours complet par l'API avec le rôle applicatif sous RLS réelle** : plus de 110 tests d'intégration couvrent l'inscription, la 2FA, le catalogue, la nomenclature des plats, la commande ROS jusqu'à l'encaissement et la clôture de session, les réservations, les remboursements, les abonnements, les transactions, les paiements, l'administration, l'isolation entre restaurants et les droits par rôle.
+- **Stock cohérent de bout en bout** : plats, combinaisons, boissons, suppléments, commandes historiques et moteur ROS passent par un seul moteur de stock (voir [Stock](#stock-plats-boissons-combinaisons-et-factures)). Ni double déduction, ni stock qui gonfle, ni stock négatif, y compris quand plusieurs commandes se disputent le dernier article.
+- **Prix 100 % serveur** dans le moteur ROS : un article du catalogue est facturé au prix du catalogue et à la TVA du restaurant, jamais à ce que la caisse envoie.
+- **Performance mesurée** : nombre de requêtes SQL constant par route, listes bornées, index composites (voir [Performance et complexité](#performance-et-complexité)).
 
 ### Routes corrigées lors de la dernière revue
 
@@ -81,7 +85,6 @@ Chaque route a été exercée contre une vraie base par `tests/test_api_integrat
 
 ### Manques fonctionnels importants
 
-- **Prix ROS non contrôlés** : le moteur ROS prend `unit_price` tel qu'envoyé. Le calcul serveur existe pour les commandes historiques, pas encore pour ROS.
 - **Pas de lien ROS ↔ Easy Transact** : les encaissements ROS sont enregistrés (espèces, MTN, Orange, carte, Wave, virement) sans appel au fournisseur.
 - **Écran cuisine temps réel** : le WebSocket est authentifié mais aucun événement n'y est encore diffusé, et son jeton n'est pas revérifié après la connexion.
 - **Réservations** : les routes écrivent directement, sans contrôle de conflit d'horaire ni de l'état des tables. `ReservationService` (qui le fait) n'est pas branché et utilise d'anciens noms de champs.
@@ -89,14 +92,12 @@ Chaque route a été exercée contre une vraie base par `tests/test_api_integrat
 - **Pas de limitation de débit** : codes 2FA et code SMS à 6 chiffres sont théoriquement devinables par essais répétés.
 - **Journaux applicatifs** : les loggers des modules ne sont pas rattachés à la configuration, les messages `info` n'apparaissent donc pas.
 
-### Stock et paiement (correction prévue)
+### Stock et encaissement : limites restantes
 
-- Une combinaison payée peut être déduite deux fois du stock.
-- À l'annulation, le stock peut gonfler (libération puis remise d'une quantité jamais retirée).
-- Un remboursement partiel remet en stock toute la commande ; les demandes en attente ne sont pas additionnées, le total remboursé peut donc dépasser le total de la commande.
-- Les plats simples ne sont pas réservés à la commande, seulement déduits au paiement : le webhook peut échouer après que le client a payé.
-- Moteur ROS : pas de verrou sur le stock, pas de contrôle de stock négatif, un `product_id` de plat est ignoré.
-- Encaissements ROS : un client peut payer plus que le dû ; la clôture de caisse additionne les espèces de tous les caissiers ; en synchronisation hors ligne, un élément en erreur peut faire échouer le lot.
+- **Pas d'annulation d'une commande ROS** : le stock est sorti à la création de la commande. Une commande ROS à payer d'avance qui n'est jamais payée garde donc son stock sorti, et il n'existe pas encore de route pour l'annuler et le remettre en rayon.
+- **Boissons** : une boisson sans `composant_id` ne consomme aucun stock (volontaire : l'eau du robinet n'a pas de stock). Le lien est à renseigner pour chaque boisson dont le stock est suivi.
+- **Caisse** : les encaissements ROS enregistrés avant le suivi de l'opérateur (`received_by` vide) ne comptent dans la caisse d'aucun opérateur.
+- **Facture partagée** : quand une commande s'ajoute à une facture de session déjà soldée, la facture est rouverte, mais son empreinte fiscale n'est pas recalculée.
 
 ### Infrastructure
 
@@ -173,7 +174,7 @@ Le fichier `.env` est ignoré par git. Toutes les variables sont décrites dans 
 
 ```powershell
 python -m alembic upgrade head
-python -m alembic current      # doit afficher 20260926_1000 (head)
+python -m alembic current      # doit afficher 20260927_1100 (head)
 ```
 
 Alembic utilise `MIGRATION_DATABASE_URL` si elle est définie, sinon la connexion de l'application.
@@ -340,7 +341,41 @@ Les exceptions métier (`AuthenticationError`, `AuthorizationError`, `Validation
 { "error": "ConflictError", "message": "Idempotency key already used", "details": null }
 ```
 
+Un stock insuffisant répond `409` avec `error: "InsufficientStockError"` et, dans `details`, chaque composant en défaut (`nom`, `requis`, `disponible`).
+
 Les erreurs d'accès levées par les gardes (`401`, `403`, `404`) gardent le format FastAPI `{ "detail": "..." }`, et les erreurs de validation de requête répondent `422`.
+
+## Performance et complexité
+
+**Ce que l'on ne peut pas promettre** : une complexité logarithmique pour *toutes* les fonctions. Lire ou renvoyer n lignes coûte au moins O(n), et traiter les k articles d'une commande coûte O(k). Personne ne peut descendre en dessous.
+
+**Ce qui est garanti, et vérifié par des tests** :
+
+| Garantie | Comment |
+|---|---|
+| Chaque recherche passe par un index (O(log n)) | Index composites commençant par `restaurant_id` ; un test échoue si une table de restaurant n'en a pas, ou si une table fille n'est pas indexée sur sa clé parente |
+| Nombre de requêtes SQL **constant** par route (aucun N+1) | `tests/test_query_budget.py` compte les instructions avec 2 puis 12 lignes et exige le même nombre |
+| Toute liste est bornée | `skip` / `limit` (100 par défaut, **500 au maximum**, sinon `422`), tri stable |
+| Le coût ne dépend pas du nombre d'articles d'une commande | Une seule requête verrouille tous les stocks concernés, une seule les résout |
+| Les chiffres de groupe ne chargent pas les lignes | Agrégats SQL (`SUM`, `COUNT`, `GROUP BY`) |
+
+**Mesures** (base PostgreSQL 18, 400 000 commandes et tickets répartis sur 200 restaurants, rôle applicatif sous RLS) :
+
+| | Avant | Après |
+|---|---|---|
+| Requêtes SQL pour une lecture simple | 12 | **5** |
+| Requêtes SQL pour une commande ROS | 25 | **10** |
+| Tickets d'un poste de cuisine | 15,8 ms (deux index à une colonne combinés, ~50 000 lignes parcourues) | **3,6 ms** (un seul index composite, uniquement les tickets utiles) |
+| Recommandations, 12 combinaisons | 60 requêtes (et quadratique) | **constant** |
+
+Le surcoût d'authentification passe de 11 à 4 requêtes : l'utilisateur, le contexte RLS (une seule instruction pour les trois variables), le restaurant, puis son contexte. L'accès au restaurant (propriétaire, membre, rôle) se résout en **une requête** puis reste mémorisé pour toute la requête HTTP, de sorte que les gardes de rôle supplémentaires ne coûtent rien.
+
+**Limites honnêtes** :
+
+- La pagination par `skip` (`OFFSET`) coûte O(skip) pour les pages très profondes ; pour des tables de plusieurs millions de lignes il faudra une pagination par curseur.
+- La recherche texte des réservations (`search`) utilise `ILIKE '%…%'`, qui n'est pas indexable : elle lit les réservations du restaurant.
+- Les chiffres de groupe (`/ros/group/reporting`) restent proportionnels au nombre de commandes d'un restaurant, calculés en une requête d'agrégat par restaurant.
+- Les migrations d'index ne sont pas `CONCURRENTLY` : sur une grande base en production, les créer en heure creuse.
 
 ## Multi-tenant et sécurité
 
@@ -361,6 +396,17 @@ Un utilisateur membre de plusieurs restaurants **doit** envoyer `X-Tenant-ID`. U
 **Dans PostgreSQL** : 36 tables ont `ROW LEVEL SECURITY` activée et forcée. La requête place trois variables locales à la transaction (`app.current_user_id`, `app.current_tenant_id`, `app.is_platform_admin`), et les politiques n'exposent que les lignes du restaurant courant. Même une requête qui oublierait un filtre ne verrait pas les données d'un autre restaurant.
 
 Quatre tables n'ont pas de RLS, volontairement : `users`, `refresh_tokens`, `subscription_tiers` et `alembic_version`.
+
+**Un audit automatique** (`tests/test_rls_audit.py`) empêche toute régression :
+
+- aucune table ne peut être ajoutée sans RLS forcée (hors les quatre ci-dessus, déclarées dans le test) ;
+- aucune politique sans `USING` **et** sans `WITH CHECK` (sinon une écriture croisée serait possible) ;
+- les fonctions de contexte sont `STABLE` et pas `SECURITY DEFINER` ;
+- le rôle applicatif ne contourne pas la RLS et ne possède aucune table ;
+- deux restaurants reçoivent des données dans **chaque** table : sous le contexte de l'un, l'autre est invisible en lecture, en modification et en suppression, et sans contexte rien n'est visible ;
+- l'écriture d'une ligne dans un autre restaurant est refusée par la base.
+
+Ces tests ont été vérifiés en retirant volontairement la RLS d'une table et en affaiblissant une politique : ils échouent.
 
 ### Pour que la RLS protège vraiment
 
@@ -414,8 +460,9 @@ Le propriétaire du restaurant, les membres `manager` et les administrateurs de 
 |---|---|
 | Lecture du catalogue, des tables, du stock, des commandes | Tout membre du restaurant |
 | Créer ou modifier carte, prix, composants, combinaisons, recettes, tables | Manager seul |
-| Mouvements de stock | Chef, sous-chef |
+| Mouvements de stock, seuil d'alerte | Chef, sous-chef |
 | Commandes, sessions, clients, statut des tables | Serveur, caissier, hôte, barman |
+| **Fixer un prix libre** à la caisse (article hors catalogue) | Manager seul |
 | Encaissements, caisse, demande de remboursement | Caissier |
 | Approuver ou rejeter un remboursement | Manager seul |
 | Tickets cuisine et bar | Chef, sous-chef, barman, serveur, hôte |
@@ -447,17 +494,18 @@ X-Idempotency-Key: 6f1c1e0a-...   (UUID, optionnel mais recommandé)
   "fulfillment_type": "DINE_IN",
   "order_channel": "POS",
   "items": [
-    { "product_name": "Poulet braisé", "quantity": 1, "unit_price": 4000,
-      "tax_rate": 19.25, "destination_station": "KITCHEN" },
-    { "product_name": "Jus d'ananas", "quantity": 2, "unit_price": 1500,
-      "destination_station": "BAR" }
+    { "product_id": "<id du plat>",    "quantity": 1, "destination_station": "KITCHEN" },
+    { "product_id": "<id de la boisson>", "quantity": 2, "destination_station": "BAR" }
   ]
 }
 ```
 
+Un article porte un `product_id` : un **plat**, une **combinaison**, une **boisson** ou un **composant**. Le nom, le prix et la TVA viennent du serveur ; `product_name`, `unit_price` et `tax_rate` envoyés pour un article du catalogue sont **ignorés**. Un article **libre** (sans `product_id`, ou un composant vendu au détail) exige `product_name` et `unit_price` et est **réservé au management** : un serveur ou un caissier reçoit `403`.
+
 Règles appliquées par le serveur :
 
-- Total = somme des lignes + TVA par ligne (19,25 % par défaut).
+- Total = somme des lignes + TVA par ligne, arrondie au centime. La TVA est celle du restaurant (`config_jsonb.taxes.tva`, 19,25 % par défaut).
+- Le stock des composants consommés est sorti dans la même transaction : s'il en manque un seul, la réponse est `409` (`InsufficientStockError`, avec la liste des composants en défaut), **aucune commande n'est créée et rien n'est sorti**.
 - `DINE_IN` : commande **confirmée** tout de suite, tickets envoyés à la cuisine et au bar. Le paiement se fait après le repas.
 - `TAKEAWAY`, `DELIVERY`, `COUNTER` : paiement **avant** préparation, la commande reste `PENDING_PAYMENT` et les tickets ne partent qu'une fois payée.
 - Une facture est créée (numéro, empreinte SHA-256) ; plusieurs commandes d'une même session s'ajoutent à la même facture.
@@ -480,7 +528,7 @@ POST /v1/ros/restaurants/{restaurant_id}/shifts/open     { "opening_balance": 15
 POST /v1/ros/restaurants/{restaurant_id}/shifts/close    { "closing_balance_counted": 15500 }
 ```
 
-La clôture calcule le solde attendu (fond de caisse + espèces encaissées), l'écart, et l'enregistre dans le journal d'audit. Un second shift ouvert par le même opérateur répond `409`.
+La clôture calcule le solde attendu (fond de caisse + **espèces encaissées par cet opérateur** depuis l'ouverture de son shift), l'écart, et l'enregistre dans le journal d'audit. Un second shift ouvert par le même opérateur répond `409`.
 
 ### Encaisser
 
@@ -500,6 +548,14 @@ POST /v1/ros/restaurants/{restaurant_id}/payments
 
 `POST .../payments/split` règle une même facture avec plusieurs moyens (`CASH`, `MTN_MOMO`, `ORANGE_MONEY`, `CARD`, `WAVE`, `BANK_TRANSFER`). Une session ne peut être fermée qu'une fois la facture soldée.
 
+Règles appliquées :
+
+- on ne peut **jamais encaisser plus que le reste dû** (`400`), et une facture soldée n'accepte plus rien ;
+- la facture est verrouillée pendant l'encaissement : deux paiements simultanés ne peuvent pas dépasser le total ;
+- un règlement partagé est **tout ou rien** : si un des règlements est refusé, aucun n'est enregistré ;
+- une commande à payer d'avance ne part en cuisine que lorsque la facture est **entièrement** payée (un acompte ne suffit pas) ;
+- si une commande s'ajoute à la facture d'une session déjà soldée, la facture et la session sont rouvertes.
+
 ### Mode hors ligne
 
 ```http
@@ -507,15 +563,32 @@ POST /v1/ros/restaurants/{restaurant_id}/sync
 { "orders": [ ... ], "payments": [ ... ] }
 ```
 
-Les commandes et paiements enregistrés sans réseau sont rejoués ; chaque élément porte sa clé d'idempotence, ce qui rend le rejeu sûr. La réponse indique le nombre d'éléments traités et les erreurs.
+Les commandes et paiements enregistrés sans réseau sont rejoués ; chaque élément porte sa clé d'idempotence, ce qui rend le rejeu sûr. Chaque élément est isolé : un élément refusé (stock manquant, facture soldée, prix libre non autorisé) est listé dans `errors` sans empêcher ni corrompre les autres. Les droits de l'appelant s'appliquent à chaque élément.
 
-### Catalogue composable et stock
+### Stock, plats, boissons, combinaisons et factures
 
-- Un **composant** (riz, sauce tomate, poulet…) a un prix de supplément, une disponibilité et un stock (`quantite`, `reservee`, `seuil_alerte`).
-- Une **combinaison** a son propre prix et référence des composants du même restaurant.
-- Stock disponible = stock physique − stock réservé. `GET .../combinaisons/recommandations` ne propose que les combinaisons dont les composants obligatoires sont disponibles.
-- Mouvements : `entree`, `ajustement`, `perte`.
-- Les prix et suppléments d'une commande historique sont calculés **par le serveur** : le client ne peut pas imposer un prix.
+- Un **composant** (riz, sauce tomate, poulet, bouteille…) a un prix de supplément, une disponibilité et un stock (`quantite`, `reservee`, `seuil_alerte`).
+- Un **plat** consomme sa **nomenclature** (voir ci-dessous). Une **combinaison** consomme ses composants obligatoires. Une **boisson** consomme le composant auquel elle est liée.
+- Stock disponible = stock physique − stock réservé. `GET .../combinaisons/recommandations` ne propose que les combinaisons dont chaque composant obligatoire est disponible **et** dont le stock libre couvre la quantité exigée.
+- Mouvements d'entrée : `entree`, `ajustement`, `perte`. Les sorties et retours sont journalisés (`sortie`, `retour`) avec leur référence.
+- `PUT /restaurants/composants/{id}/stock/seuil` fixe le seuil d'alerte : en dessous, une sortie journalise une alerte et le composant apparaît dans `GET /ros/restaurants/{id}/procurement/suggestions`.
+
+**Boissons.** `composant_id` et `stock_par_vente` (1 par défaut) relient une boisson à un composant (par exemple « Castel 65cl » → composant « bouteille Castel »). Chaque vente consomme ce stock. Le composant doit appartenir au même restaurant.
+
+**Cycle de vie du stock d'une commande historique** :
+
+| Étape | Effet sur le stock |
+|---|---|
+| Ajout d'une ligne (plat, combinaison, boisson liée, suppléments) | Les composants sont **réservés**. Stock insuffisant : `409` et rien n'est réservé |
+| Paiement confirmé par le webhook | Les réservations deviennent des **sorties** réelles, une seule fois par composant |
+| Annulation | Les réservations sont **libérées** ; rien n'est remis en rayon puisque rien n'était sorti |
+| Remboursement | Le stock ne bouge **pas**, sauf si le manager demande `remettre_en_stock` |
+
+Le moteur ROS sort le stock **à la création** de la commande (une commande en salle est consommée tout de suite).
+
+**Garanties**, toutes testées : jamais de déduction double ; jamais de stock négatif ni de réservation supérieure au stock (contrainte `CHECK` en base) ; deux commandes simultanées ne peuvent pas vendre le dernier article deux fois (14 requêtes en parallèle pour 5 unités : exactement 5 acceptées) ; tous les composants d'une commande sont verrouillés dans un ordre fixe, donc sans interblocage ; une commande refusée ne sort rien du tout.
+
+Les prix et suppléments d'une commande historique sont calculés **par le serveur** : le client ne peut pas imposer un prix. On ne peut plus ajouter de ligne à une commande payée, annulée ou en cours de paiement.
 
 **Nomenclature d'un plat.** Un plat consomme des composants à chaque commande. Le plat est désigné par l'URL, jamais par le corps :
 
@@ -528,7 +601,11 @@ PUT  /v1/restaurants/plats/{plat_id}/composants      [ { "composant_id": "...", 
 
 Un composant n'apparaît qu'une fois par plat (`409` sinon) et doit appartenir au même restaurant. À la création ou à la modification d'un plat, `composant_ids` est un raccourci qui crée la nomenclature avec une quantité de 1 chacun (`[]` la vide).
 
-**Remboursements** (commandes historiques). Les champs de la demande sont `montant`, `raison` et, pour un remboursement partiel d'articles, `item_ids`. La réponse porte `statut` (`requested`, `approved`, `rejected`…), `effectue_par_id` (qui a demandé) et `traite_par_id` (qui a décidé).
+**Remboursements** (commandes historiques). Les champs de la demande sont `montant`, `raison`, `item_ids` (les articles remboursés) et `remettre_en_stock` (faux par défaut). La réponse porte `statut` (`requested`, `approved`, `rejected`…), `effectue_par_id` (qui a demandé) et `traite_par_id` (qui a décidé).
+
+- Plafond : total − déjà remboursé − **demandes en attente**. Deux demandes successives ne peuvent donc plus dépasser ensemble le total ; un rejet libère sa part.
+- Un plat préparé ne retourne pas en rayon : le stock n'est remis que si le manager demande `remettre_en_stock`, et seulement pour les `item_ids` listés (la demande est refusée sinon). Un même article ne se rembourse qu'une fois.
+- Les articles doivent appartenir à la commande.
 
 Voir [docs/RESTAURANT_GUIDE.md](docs/RESTAURANT_GUIDE.md) pour la configuration d'un restaurant.
 
@@ -575,7 +652,7 @@ Les numéros doivent être camerounais (`+237`, neuf chiffres, commençant par 6
 
 ## Référence de l'API
 
-Toutes les routes sont préfixées par `/v1`. La colonne **Accès** résume qui peut appeler : *public*, *membre* (utilisateur connecté, restaurant vérifié), un ou plusieurs rôles d'équipe (voir [Rôles d'équipe](#rôles-déquipe)), ou *admin*. La référence exhaustive et interactive est Swagger (`/docs`).
+Toutes les routes sont préfixées par `/v1`. Toute route de liste accepte `?skip=` et `?limit=` (100 par défaut, 500 au maximum). La colonne **Accès** résume qui peut appeler : *public*, *membre* (utilisateur connecté, restaurant vérifié), un ou plusieurs rôles d'équipe (voir [Rôles d'équipe](#rôles-déquipe)), ou *admin*. La référence exhaustive et interactive est Swagger (`/docs`).
 
 ### Authentification
 
@@ -697,6 +774,8 @@ Relire toute migration générée avant de l'appliquer. Les migrations s'exécut
 | `20260925_1600` | Moteur ROS : clients, sessions, commandes, tickets, factures, paiements, caisse, audit |
 | `20260925_1700` | Rôles étendus, vérifications, 2FA, nomenclature des plats, remboursements, réservations, liste d'attente, suppression logique |
 | `20260926_1000` | RLS sur les tables ROS, réservations, nomenclature et remboursements |
+| `20260927_1000` | Index composites des requêtes chaudes, index manquants (`daily_balances`, `ros_invoices.order_id`) |
+| `20260927_1100` | Boisson liée à un composant de stock, opérateur sur les encaissements, contrainte `réservé ≤ quantité` |
 
 ## Tests
 
@@ -704,7 +783,7 @@ Relire toute migration générée avant de l'appliquer. Les migrations s'exécut
 python -m pytest --ignore=tests/test_ros.py -q
 ```
 
-184 tests, **sans base de données** : ils tournent en quelques secondes et couvrent notamment :
+190 tests, **sans base de données** : ils tournent en quelques secondes et couvrent notamment :
 
 - **Couverture des routes** : échec si une route n'a ni authentification ni garde de restaurant, ou si une action sensible (prix, remboursement, encaissement) est ouverte à un rôle trop large.
 - **Rôles** : décision d'accès pour propriétaire, manager, serveur, caissier, anciens rôles.
@@ -713,17 +792,24 @@ python -m pytest --ignore=tests/test_ros.py -q
 - **WebSocket** : refus des connexions anonymes ou au jeton falsifié.
 - **Références croisées** : identifiants et clés d'idempotence d'un autre restaurant.
 
-### Tests d'intégration de l'API
+### Tests d'intégration PostgreSQL
 
-`tests/test_api_integration.py` (47 tests) appelle **toutes les routes** contre PostgreSQL, avec le **rôle applicatif** donc sous RLS réelle, comme en production. Il détecte ce que les tests unitaires ne voient pas : une route dont le service a une autre signature, un schéma de réponse différent du modèle, une transaction validée en cours de requête.
+Ces suites appellent l'API contre PostgreSQL avec le **rôle applicatif**, donc sous RLS réelle, comme en production. Elles détectent ce que les tests unitaires ne voient pas : une route dont le service a une autre signature, un schéma de réponse différent du modèle, une transaction validée en cours de requête, un N+1, une double déduction de stock.
 
-Il s'ignore sans `TEST_DATABASE_URL`. Cette URL doit viser une base **jetable** (le nom contient `test`), migrée à la dernière révision, avec le rôle applicatif. Les requêtes sont validées comme en production : les données restent dans cette base.
+| Fichier | Tests | Ce qu'il prouve |
+|---|---|---|
+| `tests/test_api_integration.py` | 47 | Toutes les routes, l'isolation entre restaurants, les droits par rôle, la 2FA |
+| `tests/test_query_budget.py` | 12 | Nombre de requêtes constant, pagination bornée, recommandations évaluées par la base |
+| `tests/test_stock_and_payment_consistency.py` | 40 | Cycle de vie du stock, remboursements, prix serveur, encaissements, caisse, synchronisation, concurrence |
+| `tests/test_rls_audit.py` | 13 | RLS forcée partout, politiques complètes, isolement vérifié table par table |
+
+Elles s'ignorent sans `TEST_DATABASE_URL`. Cette URL doit viser une base **jetable** (le nom contient `test`), migrée à la dernière révision, avec le rôle applicatif. Les requêtes sont validées comme en production : les données restent dans cette base.
 
 ```powershell
 # 1. créer la base jetable et la migrer (voir Démarrage rapide, avec marinade_test comme nom)
 # 2. lancer
 $env:TEST_DATABASE_URL = "postgresql://marinade_app:...@localhost:5432/marinade_test"
-python -m pytest tests/test_api_integration.py -q
+python -m pytest tests/test_api_integration.py tests/test_query_budget.py tests/test_stock_and_payment_consistency.py tests/test_rls_audit.py -q
 ```
 
 ### Scénarios ROS d'intégration

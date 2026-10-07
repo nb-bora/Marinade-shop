@@ -18,6 +18,7 @@ from app.api.dependencies import (
     authenticate_websocket,
     ensure_tenant_role,
     get_current_user,
+    has_tenant_role,
     require_tenant_path,
 )
 from app.models.user import User
@@ -156,7 +157,13 @@ def create_order(
         data.idempotency_key = x_idempotency_key
 
     service = RosService(db)
-    order = service.create_order(restaurant_id, data)
+    order = service.create_order(
+        restaurant_id,
+        data,
+        allow_custom_price=has_tenant_role(
+            db, current_user, restaurant_id, perm.MANAGEMENT_ROLES
+        ),
+    )
     invoice = service.get_invoice_for_order(order)
     response = OrderResponse.model_validate(order)
     if invoice is not None:
@@ -254,7 +261,7 @@ def process_payment(
         data.idempotency_key = x_idempotency_key
 
     service = RosService(db)
-    return service.process_payment(restaurant_id, data)
+    return service.process_payment(restaurant_id, data, current_user.id)
 
 
 @router.post(
@@ -275,7 +282,7 @@ def process_split_payment(
         data.idempotency_key = x_idempotency_key
 
     service = RosService(db)
-    return service.process_split_payment(restaurant_id, data)
+    return service.process_split_payment(restaurant_id, data, current_user.id)
 
 
 # -----------------------------------------------------------------------------
@@ -334,7 +341,15 @@ def sync_offline_batch(
     if data.payments:
         ensure_tenant_role(db, current_user, restaurant_id, perm.CASH_DESK_ROLES)
     service = RosService(db)
-    return service.sync_offline_batch(restaurant_id, data.orders, data.payments)
+    return service.sync_offline_batch(
+        restaurant_id,
+        data.orders,
+        data.payments,
+        allow_custom_price=has_tenant_role(
+            db, current_user, restaurant_id, perm.MANAGEMENT_ROLES
+        ),
+        received_by=current_user.id,
+    )
 
 
 # -----------------------------------------------------------------------------

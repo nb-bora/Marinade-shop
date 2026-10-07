@@ -1,6 +1,7 @@
 from typing import Dict, Optional, List
 from datetime import datetime
-from sqlalchemy import exists, not_, or_
+from decimal import Decimal
+from sqlalchemy import exists, func, not_, or_
 from sqlalchemy.orm import Session
 from app.models.restaurant import (
     Restaurant,
@@ -616,6 +617,18 @@ class CommandeRefundRepository(BaseRepository[CommandeRefund]):
             .order_by(CommandeRefund.created_at.desc())
             .all()
         )
+
+    def pending_amount(self, commande_id: uuid.UUID) -> Decimal:
+        """Somme des demandes en attente d'une commande (une ligne d'agregat)."""
+        total = (
+            self.db.query(func.coalesce(func.sum(CommandeRefund.amount), 0))
+            .filter(
+                CommandeRefund.commande_id == commande_id,
+                CommandeRefund.status == "requested",
+            )
+            .scalar()
+        )
+        return Decimal(str(total))
 
     def get_by_status(
         self, status: str, skip: int = 0, limit: int = 100

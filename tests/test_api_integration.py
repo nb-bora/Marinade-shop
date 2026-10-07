@@ -328,12 +328,22 @@ class TestIsolationAndRoles:
     def test_waiter_takes_orders_but_cannot_cash_or_price(self, client, engine, owner):
         waiter = make_member(client, engine, owner, "waiter")
         rid = owner["rid"]
+        jus = client.post(
+            f"/v1/restaurants/{rid}/boissons", headers=owner["headers"], json={"nom": "Jus", "prix": 1500}
+        ).json()["id"]
         order = client.post(
+            f"/v1/ros/restaurants/{rid}/orders",
+            headers=waiter["headers"],
+            json={"fulfillment_type": "DINE_IN", "items": [{"product_id": jus, "quantity": 2}]},
+        )
+        assert order.status_code == 201, order.text
+        # Un serveur ne fixe pas un prix : l'article libre est refusé.
+        free = client.post(
             f"/v1/ros/restaurants/{rid}/orders",
             headers=waiter["headers"],
             json={"fulfillment_type": "DINE_IN", "items": [ITEMS[1]]},
         )
-        assert order.status_code == 201, order.text
+        assert free.status_code == 403
         assert client.post(f"/v1/ros/restaurants/{rid}/shifts/open", headers=waiter["headers"], json={"opening_balance": 1}).status_code == 403
         assert (
             client.post(

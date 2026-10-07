@@ -3,14 +3,17 @@ import uuid
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
 from datetime import datetime
-from sqlalchemy import text
+from decimal import ROUND_HALF_UP
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.utils.exceptions import (
+    AuthorizationError,
     ValidationError,
     NotFoundError,
     BusinessLogicError,
     ConflictError,
+    MarinadeException,
 )
 from app.utils.ros_enums import (
     CustomerType,
@@ -36,6 +39,12 @@ from app.models.ros import (
     RosAuditLog,
 )
 from app.core.database import get_db_context, set_db_context
+from app.services.stock_engine import StockEngine, requirements_to_json
+from app.services.stock_requirements import (
+    ProductLine,
+    classify_products,
+    requirements_for,
+)
 from app.models.restaurant import (
     StockComposant,
     StockMouvement,
@@ -78,6 +87,7 @@ class RosService:
         self.payment_repo = RosPaymentRepository(db)
         self.shift_repo = RosCashShiftRepository(db)
         self.audit_repo = RosAuditLogRepository(db)
+        self.stock_engine = StockEngine(db)
 
     # -------------------------------------------------------------------------
     # CUSTOMER MANAGEMENT
@@ -193,7 +203,34 @@ class RosService:
     # -------------------------------------------------------------------------
     # ORDER ENGINE & PRODUCTION ROUTING
     # -------------------------------------------------------------------------
-    def create_order(self, restaurant_id: uuid.UUID, data: OrderCreate) -> RosOrder:
+    DEFAULT_VAT_RATE = Decimal("19.25")
+    CENT = Decimal("0.01")
+
+    def _vat_rate(self, restaurant_id: uuid.UUID) -> Decimal:
+        """TVA appliquee aux articles du catalogue : celle du restaurant, jamais
+        celle que la caisse envoie."""
+        restaurant = self.db.get(Restaurant, restaurant_id)
+        configured = ((restaurant.config_jsonb or {}).get("taxes") or {}).get("tva")
+        try:
+            return Decimal(str(configured)) if configured is not None else self.DEFAULT_VAT_RATE
+        except ArithmeticError:
+            return self.DEFAULT_VAT_RATE
+
+    def create_order(
+        self,
+        restaurant_id: uuid.UUID,
+        data: OrderCreate,
+        *,
+        allow_custom_price: bool = False,
+    ) -> RosOrder:
+        """Cree la commande, sa facture, ses tickets ET sort le stock, atomiquement.
+
+        Prix : un article du catalogue (plat, combinaison, boisson) est toujours
+        facture au prix du catalogue et a la TVA du restaurant. Un article libre
+        (prix saisi a la caisse) est reserve au management (``allow_custom_price``).
+        Stock : les composants consommes sont verrouilles puis sortis ; s'il en manque
+        un seul, rien n'est cree et rien n'est sorti (409).
+        """
         # Idempotency Check
         if data.idempotency_key:
             existing_order = self.order_repo.get_by_idempotency_key(
@@ -213,18 +250,53 @@ class RosService:
             restaurant_id, session_id=data.session_id, customer_id=data.customer_id
         )
 
-        # Calculate totals
+        refs = classify_products(
+            self.db, restaurant_id, [i.product_id for i in data.items if i.product_id]
+        )
+        catalogue_vat = (
+            self._vat_rate(restaurant_id)
+            if any(r.kind != "composant" for r in refs.values())
+            else self.DEFAULT_VAT_RATE
+        )
+
+        priced = []  # (item, nom, prix, tva, genre)
+        stock_lines: List[ProductLine] = []
+        for item in data.items:
+            ref = refs.get(item.product_id) if item.product_id else None
+            if item.product_id and ref is None:
+                raise ValidationError(
+                    f"Produit {item.product_id} introuvable dans ce restaurant"
+                )
+            if ref is not None and ref.kind != "composant":
+                if not ref.disponible:
+                    raise BusinessLogicError(f"« {ref.nom} » n'est pas disponible")
+                priced.append((item, ref.nom, ref.prix, catalogue_vat, ref.kind))
+            else:
+                if not allow_custom_price:
+                    raise AuthorizationError(
+                        "Prix libre réservé au management : choisissez un article du catalogue"
+                    )
+                if item.unit_price is None or not item.product_name:
+                    raise ValidationError(
+                        "product_name et unit_price sont requis pour un article libre"
+                    )
+                kind = ref.kind if ref is not None else "libre"
+                priced.append(
+                    (item, item.product_name, item.unit_price, item.tax_rate, kind)
+                )
+            if ref is not None:
+                stock_lines.append(ProductLine(ref.kind, ref.id, Decimal(item.quantity)))
+
         subtotal = Decimal("0.00")
         tax_total = Decimal("0.00")
-        items_data = []
-
-        for item in data.items:
-            item_total = item.unit_price * Decimal(item.quantity)
-            subtotal += item_total
-            tax_amount = (item_total * item.tax_rate) / Decimal("100.00")
-            tax_total += tax_amount
-            items_data.append(item)
-
+        for item, _nom, price, vat, _kind in priced:
+            line_total = (price * Decimal(item.quantity)).quantize(
+                self.CENT, rounding=ROUND_HALF_UP
+            )
+            subtotal += line_total
+            tax_total += (line_total * vat / Decimal("100")).quantize(
+                self.CENT, rounding=ROUND_HALF_UP
+            )
         total_amount = subtotal + tax_total
 
         # Determine Payment Policy
@@ -242,52 +314,66 @@ class RosService:
 
         idempotency_key = data.idempotency_key or uuid.uuid4()
 
-        order_dict = {
-            "restaurant_id": restaurant_id,
-            "session_id": data.session_id,
-            "customer_id": data.customer_id,
-            "fulfillment_type": data.fulfillment_type.value,
-            "order_channel": data.order_channel.value,
-            "status": initial_status,
-            "total_amount": total_amount,
-            "idempotency_key": idempotency_key,
-        }
+        order = self.order_repo.create(
+            {
+                "restaurant_id": restaurant_id,
+                "session_id": data.session_id,
+                "customer_id": data.customer_id,
+                "fulfillment_type": data.fulfillment_type.value,
+                "order_channel": data.order_channel.value,
+                "status": initial_status,
+                "total_amount": total_amount,
+                "idempotency_key": idempotency_key,
+            }
+        )
 
-        order = self.order_repo.create(order_dict)
-
-        # Save order items & Deduct stock
+        # Lignes de commande et routage vers les postes (cuisine, bar, dessert)
         station_items: Dict[str, List[dict]] = {}
-        for item in items_data:
-            item_dict = item.model_dump()
-            item_dict["order_id"] = order.id
-            item_dict["destination_station"] = item.destination_station.value
-
-            # Persist order item
-            db_item = RosOrderItem(**item_dict)
-            self.db.add(db_item)
-
-            # Automatic ingredient stock deduction if product_id provided
-            if item.product_id:
-                self._process_stock_deduction(
-                    restaurant_id, order.id, item.product_id, item.quantity
+        for item, nom, price, vat, kind in priced:
+            self.db.add(
+                RosOrderItem(
+                    order_id=order.id,
+                    product_id=item.product_id,
+                    product_name=nom,
+                    quantity=item.quantity,
+                    unit_price=price,
+                    tax_rate=vat,
+                    destination_station=item.destination_station.value,
+                    notes=item.notes,
+                    details_jsonb={**(item.details_jsonb or {}), "kind": kind},
                 )
-
-            # Group items for production ticket routing
-            station = item.destination_station.value
-            if station not in station_items:
-                station_items[station] = []
-            station_items[station].append(
-                {
-                    "product_name": item.product_name,
-                    "quantity": item.quantity,
-                    "notes": item.notes,
-                }
             )
+            station_items.setdefault(item.destination_station.value, []).append(
+                {"product_name": nom, "quantity": item.quantity, "notes": item.notes}
+            )
+
+        # Sortie de stock : une requete de verrou pour toute la commande, quel que
+        # soit le nombre d'articles. Echec = rien de cree, rien de sorti.
+        requirements = requirements_for(self.db, restaurant_id, stock_lines)
+        if requirements:
+            low_stock = self.stock_engine.consume_direct(
+                requirements,
+                "ROS_ORDER",
+                order.id,
+                f"Consommation automatique pour la commande ROS {order.id}",
+            )
+            for stock in low_stock:
+                self.audit_repo.log_action(
+                    restaurant_id=restaurant_id,
+                    action="STOCK_ALERT_LOW",
+                    entity_name="StockComposant",
+                    entity_id=stock.id,
+                    after_state={
+                        "quantite": str(stock.quantite),
+                        "seuil_alerte": str(stock.seuil_alerte),
+                    },
+                    reason=f"Stock sous le seuil d'alerte suite à la commande ROS {order.id}",
+                )
 
         self.db.flush()
 
-        # Generate Production Tickets for each station if CONFIRMED
-        if order.status == RosOrderStatus.CONFIRMED.value or not is_prepaid:
+        # Les commandes a payer d'avance n'arrivent en cuisine qu'une fois payees.
+        if not is_prepaid:
             for station, ticket_items in station_items.items():
                 self.ticket_repo.create(
                     {
@@ -348,18 +434,38 @@ class RosService:
                 }
             )
         else:
-            # Update existing session invoice
+            # Une commande de plus sur la facture de la session : si elle etait
+            # soldee, elle ne l'est plus. Sans cela la table restait « payee » alors
+            # qu'elle devait encore de l'argent.
             new_subtotal = invoice.subtotal + subtotal
             new_tax = invoice.tax_amount + tax_total
             new_total = invoice.total_amount + total_amount
+            if invoice.amount_paid >= new_total:
+                new_status = InvoiceStatus.PAID.value
+            elif invoice.amount_paid > 0:
+                new_status = InvoiceStatus.PARTIALLY_PAID.value
+            else:
+                new_status = InvoiceStatus.ISSUED.value
             self.invoice_repo.update(
                 invoice,
                 {
                     "subtotal": new_subtotal,
                     "tax_amount": new_tax,
                     "total_amount": new_total,
+                    "status": new_status,
                 },
             )
+            if invoice.session_id and new_status != InvoiceStatus.PAID.value:
+                session = self.session_repo.get(str(invoice.session_id))
+                if session and session.status == SessionStatus.SETTLED.value:
+                    self.session_repo.update(
+                        session,
+                        {
+                            "status": SessionStatus.PARTIALLY_PAID.value
+                            if invoice.amount_paid > 0
+                            else SessionStatus.ACTIVE.value
+                        },
+                    )
 
         return invoice
 
@@ -414,7 +520,10 @@ class RosService:
     # PAYMENT PROCESSING & SPLIT BILL
     # -------------------------------------------------------------------------
     def process_payment(
-        self, restaurant_id: uuid.UUID, data: PaymentCreate
+        self,
+        restaurant_id: uuid.UUID,
+        data: PaymentCreate,
+        received_by: Optional[uuid.UUID] = None,
     ) -> RosPaymentTransaction:
         # Idempotency check
         if data.idempotency_key:
@@ -426,9 +535,20 @@ class RosService:
                     raise ConflictError("Idempotency key already used")
                 return existing_pay
 
-        invoice = self.invoice_repo.get(str(data.invoice_id))
+        # Verrou sur la facture : deux encaissements simultanes se serialisent au
+        # lieu de lire chacun le meme « deja paye » et de depasser le total.
+        invoice = self.invoice_repo.get_for_update(data.invoice_id)
         if not invoice or invoice.restaurant_id != restaurant_id:
             raise NotFoundError(f"Facture {data.invoice_id} introuvable")
+
+        amount_due = invoice.total_amount - invoice.amount_paid
+        if amount_due <= 0:
+            raise BusinessLogicError("Cette facture est déjà soldée")
+        if data.amount > amount_due:
+            raise BusinessLogicError(
+                f"Le montant dépasse le reste dû ({amount_due} XAF) : "
+                "encaissez au plus ce qui est dû"
+            )
 
         idempotency_key = data.idempotency_key or uuid.uuid4()
 
@@ -440,6 +560,7 @@ class RosService:
             "status": "SUCCEEDED",
             "external_reference": data.external_reference,
             "idempotency_key": idempotency_key,
+            "received_by": received_by,
         }
 
         payment = self.payment_repo.create(pay_dict)
@@ -456,8 +577,9 @@ class RosService:
             invoice, {"amount_paid": new_paid, "status": invoice_status}
         )
 
-        # If order was pending payment, release to production tickets
-        if invoice.order_id:
+        # Une commande a payer d'avance part en production seulement quand la facture
+        # est SOLDEE : un acompte ne doit pas lancer la cuisine.
+        if invoice.order_id and invoice_status == InvoiceStatus.PAID.value:
             order = self.order_repo.get(str(invoice.order_id))
             if order and order.status == RosOrderStatus.PENDING_PAYMENT.value:
                 self.order_repo.update(
@@ -482,6 +604,7 @@ class RosService:
             action="PROCESS_PAYMENT",
             entity_name="RosPaymentTransaction",
             entity_id=payment.id,
+            actor_id=received_by,
             after_state={
                 "amount": str(data.amount),
                 "method": data.payment_method.value,
@@ -491,7 +614,10 @@ class RosService:
         return payment
 
     def process_split_payment(
-        self, restaurant_id: uuid.UUID, data: SplitPaymentRequest
+        self,
+        restaurant_id: uuid.UUID,
+        data: SplitPaymentRequest,
+        received_by: Optional[uuid.UUID] = None,
     ) -> List[RosPaymentTransaction]:
         results = []
         for idx, item in enumerate(data.payments):
@@ -507,8 +633,8 @@ class RosService:
                 external_reference=item.external_reference,
                 idempotency_key=item_idempotency,
             )
-            pay_txn = self.process_payment(restaurant_id, pay_create)
-            results.append(pay_txn)
+            # Tout ou rien : si un des reglements echoue, la requete est annulee.
+            results.append(self.process_payment(restaurant_id, pay_create, received_by))
         return results
 
     def _dispatch_deferred_tickets(self, restaurant_id: uuid.UUID, order: RosOrder):
@@ -583,19 +709,22 @@ class RosService:
                 "Aucun shift de caisse ouvert trouvé pour cet opérateur"
             )
 
-        # Calculate expected cash sales during shift
-        cash_sales = (
-            self.db.query(RosPaymentTransaction)
-            .filter(
-                RosPaymentTransaction.restaurant_id == restaurant_id,
-                RosPaymentTransaction.payment_method == RosPaymentMethod.CASH.value,
-                RosPaymentTransaction.created_at >= shift.opened_at,
-                RosPaymentTransaction.status == "SUCCEEDED",
+        # Especes encaissees PAR CET OPERATEUR depuis l'ouverture de son shift,
+        # additionnees par la base. Avant : celles de tous les caissiers du restaurant.
+        total_cash_sales = Decimal(
+            str(
+                self.db.execute(
+                    select(func.coalesce(func.sum(RosPaymentTransaction.amount), 0)).where(
+                        RosPaymentTransaction.restaurant_id == restaurant_id,
+                        RosPaymentTransaction.received_by == operator_user_id,
+                        RosPaymentTransaction.payment_method
+                        == RosPaymentMethod.CASH.value,
+                        RosPaymentTransaction.created_at >= shift.opened_at,
+                        RosPaymentTransaction.status == "SUCCEEDED",
+                    )
+                ).scalar()
             )
-            .all()
         )
-
-        total_cash_sales = sum([p.amount for p in cash_sales], Decimal("0.00"))
         expected_closing = shift.opening_balance + total_cash_sales
         variance = data.closing_balance_counted - expected_closing
 
@@ -636,34 +765,44 @@ class RosService:
         restaurant_id: uuid.UUID,
         orders: List[OrderCreate],
         payments: List[PaymentCreate],
+        *,
+        allow_custom_price: bool = False,
+        received_by: Optional[uuid.UUID] = None,
     ) -> Dict[str, Any]:
+        """Rejoue un lot saisi hors ligne. Chaque element est isole par un point de
+        sauvegarde : un element refuse (stock manquant, facture soldee...) est
+        signale sans emporter ni corrompre les autres."""
         processed_orders = 0
         processed_payments = 0
         errors = []
 
         for ord_data in orders:
             try:
-                self.create_order(restaurant_id, ord_data)
+                with self.db.begin_nested():
+                    self.create_order(
+                        restaurant_id, ord_data, allow_custom_price=allow_custom_price
+                    )
                 processed_orders += 1
-            except Exception as e:
+            except (MarinadeException, ValueError) as e:
                 errors.append(
                     {
                         "type": "order",
                         "idempotency_key": str(ord_data.idempotency_key),
-                        "error": str(e),
+                        "error": getattr(e, "message", str(e)),
                     }
                 )
 
         for pay_data in payments:
             try:
-                self.process_payment(restaurant_id, pay_data)
+                with self.db.begin_nested():
+                    self.process_payment(restaurant_id, pay_data, received_by)
                 processed_payments += 1
-            except Exception as e:
+            except (MarinadeException, ValueError) as e:
                 errors.append(
                     {
                         "type": "payment",
                         "idempotency_key": str(pay_data.idempotency_key),
-                        "error": str(e),
+                        "error": getattr(e, "message", str(e)),
                     }
                 )
 
@@ -673,111 +812,35 @@ class RosService:
             "errors": errors,
         }
 
-    # -------------------------------------------------------------------------
-    # STOCK & INVENTORY DEDUCTION HELPER
-    # -------------------------------------------------------------------------
-    def _process_stock_deduction(
-        self,
-        restaurant_id: uuid.UUID,
-        order_id: uuid.UUID,
-        product_id: uuid.UUID,
-        quantity: int,
-    ):
-        if not product_id:
-            return
-
-        # Check if product_id has multi-ingredient technical card (CombinaisonComposant)
-        sub_components = (
-            self.db.query(CombinaisonComposant)
-            .filter(CombinaisonComposant.combinaison_id == product_id)
-            .all()
-        )
-        if sub_components:
-            for sub in sub_components:
-                ingredient_qty = sub.quantite * Decimal(quantity)
-                self._deduct_single_component_stock(
-                    restaurant_id, order_id, sub.composant_id, ingredient_qty
-                )
-        else:
-            self._deduct_single_component_stock(
-                restaurant_id, order_id, product_id, Decimal(quantity)
-            )
-
-    def _deduct_single_component_stock(
-        self,
-        restaurant_id: uuid.UUID,
-        order_id: uuid.UUID,
-        composant_id: uuid.UUID,
-        qty_dec: Decimal,
-    ):
-        stock = (
-            self.db.query(StockComposant)
-            .filter(StockComposant.composant_id == composant_id)
-            .first()
-        )
-        if stock:
-            stock.quantite -= qty_dec
-
-            mouvement = StockMouvement(
-                composant_id=composant_id,
-                type="SORTIE",
-                quantite=qty_dec,
-                reference_type="ROS_ORDER",
-                reference_id=order_id,
-                notes=f"Consommation automatique pour la commande ROS {order_id}",
-            )
-            self.db.add(mouvement)
-
-            if stock.quantite <= stock.seuil_alerte:
-                self.audit_repo.log_action(
-                    restaurant_id=restaurant_id,
-                    action="STOCK_ALERT_LOW",
-                    entity_name="StockComposant",
-                    entity_id=stock.id,
-                    after_state={
-                        "quantite": str(stock.quantite),
-                        "seuil_alerte": str(stock.seuil_alerte),
-                    },
-                    reason=f"Stock sous le seuil d'alerte suite à la commande ROS {order_id}",
-                )
-
-    # -------------------------------------------------------------------------
-    # AUTO-PROCUREMENT ENGINE
-    # -------------------------------------------------------------------------
     def generate_procurement_suggestions(
         self, restaurant_id: uuid.UUID
     ) -> Dict[str, Any]:
-        stocks = (
-            self.db.query(StockComposant)
-            .join(Composant)
-            .filter(
+        # Une seule requete (stock + composant) ; avant : une requete par composant.
+        rows = self.db.execute(
+            select(StockComposant, Composant.nom, Composant.stock_unite)
+            .join(Composant, Composant.id == StockComposant.composant_id)
+            .where(
                 Composant.restaurant_id == restaurant_id,
                 StockComposant.quantite <= StockComposant.seuil_alerte,
             )
-            .all()
-        )
+            .order_by(Composant.nom, Composant.id)
+            .limit(500)
+        ).all()
 
-        items = []
-        for s in stocks:
-            comp = (
-                self.db.query(Composant).filter(Composant.id == s.composant_id).first()
-            )
-            comp_name = comp.nom if comp else "Composant Inconnu"
-            unit = comp.stock_unite if comp else "portion"
-            suggested = max(
-                (s.seuil_alerte * Decimal("2.0")) - s.quantite, Decimal("1.0")
-            )
-
-            items.append(
-                {
-                    "composant_id": s.composant_id,
-                    "composant_name": comp_name,
-                    "current_stock": s.quantite,
-                    "seuil_alerte": s.seuil_alerte,
-                    "suggested_order_qty": suggested,
-                    "unit": unit,
-                }
-            )
+        items = [
+            {
+                "composant_id": stock.composant_id,
+                "composant_name": nom,
+                "current_stock": stock.quantite,
+                "seuil_alerte": stock.seuil_alerte,
+                "suggested_order_qty": max(
+                    (stock.seuil_alerte * Decimal("2.0")) - stock.quantite,
+                    Decimal("1.0"),
+                ),
+                "unit": unite,
+            }
+            for stock, nom, unite in rows
+        ]
 
         return {
             "restaurant_id": restaurant_id,
@@ -785,9 +848,6 @@ class RosService:
             "items": items,
         }
 
-    # -------------------------------------------------------------------------
-    # MULTI-SITE GROUP REPORTING ENGINE
-    # -------------------------------------------------------------------------
     def get_group_consolidated_reporting(self, user_id: uuid.UUID) -> Dict[str, Any]:
         user_restaurants = (
             self.db.query(Restaurant).filter(Restaurant.user_id == user_id).all()
@@ -828,41 +888,38 @@ class RosService:
         }
 
     def _restaurant_figures(self, restaurant_id: uuid.UUID) -> Dict[str, Any]:
-        """Revenue, order count and breakdowns of ONE restaurant (tenant context set)."""
-        invoices = (
-            self.db.query(RosInvoice)
-            .filter(
+        """Chiffres d'UN restaurant (contexte restaurant deja positionne), agreges
+        par la base : le volume lu ne depend plus du nombre de commandes."""
+        zero = Decimal("0.00")
+        revenue = self.db.execute(
+            select(func.coalesce(func.sum(RosInvoice.total_amount), 0)).where(
                 RosInvoice.restaurant_id == restaurant_id,
                 RosInvoice.status == InvoiceStatus.PAID.value,
             )
-            .all()
-        )
-        orders = (
-            self.db.query(RosOrder).filter(RosOrder.restaurant_id == restaurant_id).all()
-        )
-        payments = (
-            self.db.query(RosPaymentTransaction)
-            .filter(
+        ).scalar()
+        by_channel_rows = self.db.execute(
+            select(
+                RosOrder.order_channel,
+                func.count(RosOrder.id),
+                func.coalesce(func.sum(RosOrder.total_amount), 0),
+            )
+            .where(RosOrder.restaurant_id == restaurant_id)
+            .group_by(RosOrder.order_channel)
+        ).all()
+        by_method_rows = self.db.execute(
+            select(
+                RosPaymentTransaction.payment_method,
+                func.coalesce(func.sum(RosPaymentTransaction.amount), 0),
+            )
+            .where(
                 RosPaymentTransaction.restaurant_id == restaurant_id,
                 RosPaymentTransaction.status == "SUCCEEDED",
             )
-            .all()
-        )
-
-        by_channel: Dict[str, Decimal] = {}
-        for order in orders:
-            by_channel[order.order_channel] = (
-                by_channel.get(order.order_channel, Decimal("0.00"))
-                + order.total_amount
-            )
-        by_method: Dict[str, Decimal] = {}
-        for payment in payments:
-            by_method[payment.payment_method] = (
-                by_method.get(payment.payment_method, Decimal("0.00")) + payment.amount
-            )
+            .group_by(RosPaymentTransaction.payment_method)
+        ).all()
         return {
-            "revenue": sum([inv.total_amount for inv in invoices], Decimal("0.00")),
-            "orders": len(orders),
-            "by_channel": by_channel,
-            "by_method": by_method,
+            "revenue": Decimal(str(revenue)) if revenue else zero,
+            "orders": sum(count for _channel, count, _total in by_channel_rows),
+            "by_channel": {c: Decimal(str(total)) for c, _n, total in by_channel_rows},
+            "by_method": {m: Decimal(str(total)) for m, total in by_method_rows},
         }

@@ -60,6 +60,14 @@ from app.models.restaurant import (
     CommandeItem,
     CommandeRefund,
 )
+from app.services.stock_engine import (
+    StockEngine,
+    merge_requirements,
+    requirements_from_json,
+    requirements_to_json,
+    scale_requirements,
+)
+from app.services.stock_requirements import ProductLine, requirements_for
 from app.utils.logging import get_logger
 from app.utils.enums import CommandeStatut, RefundStatus, TableStatut
 from app.utils.exceptions import (
@@ -266,6 +274,18 @@ class StockService:
             for stock in self.stock_repo.get_by_restaurant_id(restaurant_id, skip, limit)
         ]
 
+    def set_threshold(self, composant_id: uuid.UUID, seuil_alerte: Decimal) -> dict:
+        composant = self.composant_repo.get(str(composant_id))
+        if not composant:
+            raise NotFoundError("Composant not found")
+        stock = self.stock_repo.get_by_composant_id(composant_id, lock=True)
+        if not stock:
+            raise NotFoundError("Stock not initialized for component")
+        stock.seuil_alerte = seuil_alerte
+        self.db.flush()
+        self.db.refresh(stock)
+        return self._stock_state(stock)
+
     def add_movement(self, composant_id: uuid.UUID, data: StockMouvementCreate) -> dict:
         composant = self.composant_repo.get(str(composant_id))
         if not composant:
@@ -294,43 +314,6 @@ class StockService:
         )
         self.db.refresh(stock)
         return self._stock_state(stock)
-
-    def reserve(self, requirements: dict[uuid.UUID, Decimal]) -> None:
-        stocks = {}
-        for composant_id, required in requirements.items():
-            stock = self.stock_repo.get_by_composant_id(composant_id, lock=True)
-            if not stock or stock.quantite - stock.reservee < required:
-                raise ValueError("Insufficient available stock for combination")
-            stocks[composant_id] = stock
-        for composant_id, required in requirements.items():
-            stocks[composant_id].reservee += required
-
-    def release(self, requirements: dict[uuid.UUID, Decimal]) -> None:
-        for composant_id, required in requirements.items():
-            stock = self.stock_repo.get_by_composant_id(composant_id, lock=True)
-            if stock:
-                stock.reservee = max(Decimal("0"), stock.reservee - required)
-
-    def consume_reserved(
-        self, requirements: dict[uuid.UUID, Decimal], reference_id: uuid.UUID
-    ) -> None:
-        for composant_id, required in requirements.items():
-            stock = self.stock_repo.get_by_composant_id(composant_id, lock=True)
-            if not stock or stock.reservee < required or stock.quantite < required:
-                raise ValueError("Reserved stock is no longer available")
-            stock.reservee -= required
-            stock.quantite -= required
-            self.db.add(
-                StockMouvement(
-                    composant_id=composant_id,
-                    type="sortie",
-                    quantite=required,
-                    reference_type="commande",
-                    reference_id=reference_id,
-                    notes="Consommation de commande",
-                )
-            )
-
 
 class CombinaisonService:
     def __init__(self, db: Session):
@@ -584,6 +567,7 @@ class BoissonService:
     def __init__(self, db: Session):
         self.db = db
         self.boisson_repo = BoissonRepository(db)
+        self.composant_repo = ComposantRepository(db)
         self.restaurant_repo = RestaurantRepository(db)
 
     def create_boisson(
@@ -600,11 +584,24 @@ class BoissonService:
             logger.warning(f"Invalid price: {boisson_data.prix}")
             raise ValueError("Price must be positive")
 
+        self._ensure_stock_component(restaurant_id, boisson_data.composant_id)
+
         boisson = self.boisson_repo.create(
             {**boisson_data.model_dump(), "restaurant_id": restaurant_id}
         )
         logger.info(f"Boisson created: {boisson.id}")
         return boisson
+
+    def _ensure_stock_component(
+        self, restaurant_id: uuid.UUID, composant_id: Optional[uuid.UUID]
+    ) -> None:
+        """Le composant lie a une boisson doit etre un composant de CE restaurant."""
+        if composant_id is None:
+            return
+        if composant_id not in self.composant_repo.get_by_ids(
+            restaurant_id, [composant_id]
+        ):
+            raise ValueError("composant_id must be a component of this restaurant")
 
     def get_boisson(self, boisson_id: uuid.UUID) -> Optional[Boisson]:
         return self.boisson_repo.get(str(boisson_id))
@@ -640,6 +637,9 @@ class BoissonService:
         if boisson_data.prix is not None and boisson_data.prix <= 0:
             logger.warning(f"Invalid price: {boisson_data.prix}")
             raise ValueError("Price must be positive")
+
+        if boisson_data.composant_id is not None:
+            self._ensure_stock_component(boisson.restaurant_id, boisson_data.composant_id)
 
         updated_boisson = self.boisson_repo.update(
             boisson, boisson_data.model_dump(exclude_unset=True)
@@ -708,98 +708,9 @@ class CommandeService:
         self.link_repo = CombinaisonComposantRepository(db)
         self.stock_repo = StockComposantRepository(db)
         self.mouvement_repo = StockMouvementRepository(db)
-        self.stock_service = StockService(db)
+        self.stock_engine = StockEngine(db)
         self.table_repo = TableRepository(db)
         self.restaurant_repo = RestaurantRepository(db)
-
-    def _deduct_stock_for_commande(
-        self, commande_id: uuid.UUID, inverse: bool = False
-    ) -> None:
-        items = self.item_repo.get_by_commande_id(commande_id)
-        if not items:
-            return
-
-        sign = Decimal("-1") if inverse else Decimal("1")
-        mouvement_type = "RESTOCK" if inverse else "CONSUMPTION"
-
-        for item in items:
-            item_qty = Decimal(str(item.quantite))
-            refunded_qty = (
-                Decimal(str(item.refunded_quantity)) if inverse else Decimal("0")
-            )
-            effective_qty = (item_qty - refunded_qty) if inverse else item_qty
-            if effective_qty <= 0:
-                continue
-
-            if item.plat_id is not None:
-                plat_composants = self.plat_composant_repo.get_by_plat_id(item.plat_id)
-                for pc in plat_composants:
-                    composant_qty = (Decimal(str(pc.quantite)) * effective_qty) * sign
-                    stock = self.stock_repo.get_by_composant_id(
-                        pc.composant_id, lock=True
-                    )
-                    if stock is None:
-                        if not inverse:
-                            raise BusinessLogicError(
-                                f"Insufficient stock: composant {pc.composant_id} has no stock record"
-                            )
-                        continue
-                    new_quantite = (
-                        stock.quantite
-                        - Decimal(str(pc.quantite)) * effective_qty * sign
-                    )
-                    if not inverse and new_quantite < 0:
-                        raise BusinessLogicError("Insufficient stock")
-                    stock.quantite = new_quantite
-                    if stock.quantite < 0:
-                        stock.quantite = Decimal("0")
-                    self.db.add(
-                        StockMouvement(
-                            composant_id=pc.composant_id,
-                            type=mouvement_type,
-                            quantite=abs(Decimal(str(pc.quantite)) * effective_qty),
-                            reference_type="commande",
-                            reference_id=commande_id,
-                            notes=f"{'Restock' if inverse else 'Consommation'} pour commande {commande_id}",
-                        )
-                    )
-
-            elif item.combinaison_id is not None:
-                comb_composants = self.link_repo.get_by_combinaison_id(
-                    item.combinaison_id
-                )
-                for cc in comb_composants:
-                    composant_qty = (Decimal(str(cc.quantite)) * effective_qty) * sign
-                    stock = self.stock_repo.get_by_composant_id(
-                        cc.composant_id, lock=True
-                    )
-                    if stock is None:
-                        if not inverse:
-                            raise BusinessLogicError(
-                                f"Insufficient stock: composant {cc.composant_id} has no stock record"
-                            )
-                        continue
-                    new_quantite = (
-                        stock.quantite
-                        - Decimal(str(cc.quantite)) * effective_qty * sign
-                    )
-                    if not inverse and new_quantite < 0:
-                        raise BusinessLogicError("Insufficient stock")
-                    stock.quantite = new_quantite
-                    if stock.quantite < 0:
-                        stock.quantite = Decimal("0")
-                    self.db.add(
-                        StockMouvement(
-                            composant_id=cc.composant_id,
-                            type=mouvement_type,
-                            quantite=abs(Decimal(str(cc.quantite)) * effective_qty),
-                            reference_type="commande",
-                            reference_id=commande_id,
-                            notes=f"{'Restock' if inverse else 'Consommation'} combinaison pour commande {commande_id}",
-                        )
-                    )
-
-        self.db.flush()
 
     def create_commande(
         self, commande_data: CommandeCreate, restaurant_id: uuid.UUID
@@ -834,8 +745,6 @@ class CommandeService:
         if commande_data.table_id:
             self.table_repo.update(table, {"statut": TableStatut.OCCUPEE.value})
 
-        self._deduct_stock_for_commande(commande.id)
-
         logger.info(f"Commande created: {commande.id}")
         return commande
 
@@ -851,6 +760,15 @@ class CommandeService:
         self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
     ) -> List[Commande]:
         return self.commande_repo.get_active_commandes(restaurant_id, skip, limit)
+
+    def _items_requirements(self, items):
+        """Promesses de stock portees par les lignes (reservees a l'ajout)."""
+        return merge_requirements(
+            *[
+                requirements_from_json((i.details_jsonb or {}).get("stock_requirements"))
+                for i in items
+            ]
+        )
 
     def update_commande(
         self, commande_id: uuid.UUID, commande_data: CommandeUpdate
@@ -882,18 +800,13 @@ class CommandeService:
         }:
             raise BusinessLogicError("A paid or cancelled commande cannot be edited")
         if commande_data.statut == CommandeStatut.ANNULEE.value:
-            for item in self.item_repo.get_by_commande_id(commande_id):
-                for requirement in (item.details_jsonb or {}).get(
-                    "stock_requirements", []
-                ):
-                    self.stock_service.release(
-                        {
-                            uuid.UUID(requirement["composant_id"]): Decimal(
-                                requirement["quantite"]
-                            )
-                        }
-                    )
-            self._deduct_stock_for_commande(commande_id, inverse=True)
+            # Annuler libere la promesse de stock. Rien n'a ete consomme : on ne
+            # remet donc RIEN en rayon (remettre du stock jamais sorti le gonflerait).
+            promised = self._items_requirements(
+                self.item_repo.get_by_commande_id(commande_id)
+            )
+            if promised:
+                self.stock_engine.release(promised)
         for field, value in commande_data.model_dump(exclude_unset=True).items():
             setattr(commande, field, value)
         if commande_data.statut == CommandeStatut.ANNULEE.value and commande.table_id:
@@ -921,17 +834,30 @@ class CommandeService:
             raise BusinessLogicError("Commande is linked to another payment intent")
         if commande.total is None or commande.total < 0:
             raise ValidationError("Invalid commande total")
-        for item in self.item_repo.get_by_commande_id(commande_id):
-            for requirement in (item.details_jsonb or {}).get("stock_requirements", []):
-                self.stock_service.consume_reserved(
-                    {
-                        uuid.UUID(requirement["composant_id"]): Decimal(
-                            requirement["quantite"]
-                        )
-                    },
-                    commande_id,
+
+        # UNE sortie de stock par composant : on transforme en consommation reelle
+        # les promesses faites a l'ajout des lignes. Les lignes anterieures a ce
+        # cycle de vie (sans promesse enregistree) sont consommees directement.
+        items = self.item_repo.get_by_commande_id(commande_id)
+        promised = self._items_requirements(items)
+        unreserved = [
+            i for i in items if "stock_requirements" not in (i.details_jsonb or {})
+        ]
+        if promised:
+            self.stock_engine.consume_reserved(
+                promised, "commande", commande_id, "Consommation de commande"
+            )
+        if unreserved:
+            legacy = requirements_for(
+                self.db,
+                commande.restaurant_id,
+                [self._line_of(i) for i in unreserved if self._line_of(i)],
+            )
+            if legacy:
+                self.stock_engine.consume_direct(
+                    legacy, "commande", commande_id, "Consommation de commande"
                 )
-        self._deduct_stock_for_commande(commande_id)
+
         commande.statut = CommandeStatut.PAYEE.value
         commande.payment_intent_id = payment_intent_id
         commande.metadata_jsonb = {
@@ -946,6 +872,17 @@ class CommandeService:
         self.db.flush()
         return commande
 
+    @staticmethod
+    def _line_of(item: CommandeItem) -> Optional[ProductLine]:
+        quantity = Decimal(str(item.quantite))
+        if item.plat_id is not None:
+            return ProductLine("plat", item.plat_id, quantity)
+        if item.combinaison_id is not None:
+            return ProductLine("combinaison", item.combinaison_id, quantity)
+        if item.boisson_id is not None:
+            return ProductLine("boisson", item.boisson_id, quantity)
+        return None
+
     def add_item(
         self, commande_id: uuid.UUID, item_data: CommandeItemCreate
     ) -> CommandeItem:
@@ -953,6 +890,15 @@ class CommandeService:
         if not commande:
             logger.warning(f"Commande not found: {commande_id}")
             raise NotFoundError("Commande not found")
+        if commande.statut not in {
+            CommandeStatut.EN_COURS.value,
+            CommandeStatut.SERVIE.value,
+        }:
+            # Une commande payee, annulee ou en cours de paiement a un montant
+            # fige : y ajouter une ligne reserverait du stock jamais consomme.
+            raise BusinessLogicError(
+                f"Cannot add items to a commande in status '{commande.statut}'"
+            )
 
         selected_types = sum(
             bool(value)
@@ -970,7 +916,9 @@ class CommandeService:
         prix_unitaire = None
         supplements_total = Decimal("0")
         details = {"supplements": []}
-        stock_requirements = {}
+        quantity = Decimal(item_data.quantite)
+        component_ids: list = []
+
         if item_data.combinaison_id:
             combinaison = self.combinaison_repo.get(str(item_data.combinaison_id))
             if not combinaison or combinaison.restaurant_id != commande.restaurant_id:
@@ -978,28 +926,10 @@ class CommandeService:
             if not combinaison.disponible:
                 raise BusinessLogicError("Combinaison is not available")
             links = self.link_repo.get_by_combinaison_id(combinaison.id)
-            component_ids = [link.composant_id for link in links]
-            available_ids = {
-                component.id
-                for component in self.composant_repo.get_available_by_ids(
-                    commande.restaurant_id, component_ids
-                )
-            }
-            if any(
-                link.obligatoire and link.composant_id not in available_ids
-                for link in links
-            ):
-                raise BusinessLogicError(
-                    "Combinaison contains an unavailable component"
-                )
+            component_ids = [l.composant_id for l in links if l.obligatoire]
             prix_unitaire = combinaison.prix
             details["combinaison"] = combinaison.nom
-            for link in links:
-                if link.obligatoire:
-                    stock_requirements[link.composant_id] = (
-                        stock_requirements.get(link.composant_id, Decimal("0"))
-                        + Decimal(str(link.quantite)) * item_data.quantite
-                    )
+            line = ProductLine("combinaison", combinaison.id, quantity)
 
         elif item_data.plat_id:
             plat = self.plat_repo.get(str(item_data.plat_id))
@@ -1009,9 +939,13 @@ class CommandeService:
             if not plat.disponible:
                 logger.warning(f"Plat not available: {plat.nom}")
                 raise BusinessLogicError("Plat is not available")
+            component_ids = [
+                l.composant_id for l in self.plat_composant_repo.get_by_plat_id(plat.id)
+            ]
             prix_unitaire = plat.prix
+            line = ProductLine("plat", plat.id, quantity)
 
-        elif item_data.boisson_id:
+        else:
             boisson = self.boisson_repo.get(str(item_data.boisson_id))
             if not boisson or boisson.restaurant_id != commande.restaurant_id:
                 logger.warning(
@@ -1022,29 +956,31 @@ class CommandeService:
                 logger.warning(f"Boisson not available: {boisson.nom}")
                 raise BusinessLogicError("Boisson is not available")
             prix_unitaire = boisson.prix
+            line = ProductLine("boisson", boisson.id, quantity)
 
+        # Un composant indisponible (« sauce epuisee ») bloque tout article qui en
+        # depend : combinaison OU plat. Une seule requete pour tous les composants.
+        if component_ids:
+            available = self.composant_repo.get_available_by_ids(
+                commande.restaurant_id, component_ids
+            )
+            if len({c.id for c in available}) != len(set(component_ids)):
+                raise BusinessLogicError("Article contains an unavailable component")
+
+        lines = [line]
         if item_data.supplement_ids:
             supplements = self.composant_repo.get_available_by_ids(
                 commande.restaurant_id, item_data.supplement_ids
             )
-            if len(supplements) != len(item_data.supplement_ids):
+            supplements_by_id = {s.id: s for s in supplements}
+            if len(supplements_by_id) != len(set(item_data.supplement_ids)):
                 raise ValidationError(
                     "One or more supplements are invalid or unavailable"
                 )
-            supplements_by_id = {
-                supplement.id: supplement for supplement in supplements
-            }
             for supplement_id in item_data.supplement_ids:
-                supplement = supplements_by_id.get(supplement_id)
-                if not supplement:
-                    raise ValidationError(
-                        "One or more supplements are invalid or unavailable"
-                    )
+                supplement = supplements_by_id[supplement_id]
                 supplements_total += supplement.prix_supplement
-                stock_requirements[supplement.id] = (
-                    stock_requirements.get(supplement.id, Decimal("0"))
-                    + item_data.quantite
-                )
+                lines.append(ProductLine("composant", supplement.id, quantity))
                 details["supplements"].append(
                     {
                         "id": str(supplement.id),
@@ -1053,12 +989,12 @@ class CommandeService:
                     }
                 )
 
-        if stock_requirements:
-            self.stock_service.reserve(stock_requirements)
-            details["stock_requirements"] = [
-                {"composant_id": str(composant_id), "quantite": str(quantite)}
-                for composant_id, quantite in stock_requirements.items()
-            ]
+        # Promesse de stock pour TOUS les types (plat, combinaison, boisson,
+        # supplements) : le paiement ne peut plus echouer faute de stock.
+        requirements = requirements_for(self.db, commande.restaurant_id, lines)
+        if requirements:
+            self.stock_engine.reserve(requirements)
+        details["stock_requirements"] = requirements_to_json(requirements)
 
         prix_facture_unitaire = prix_unitaire + supplements_total
         total = prix_facture_unitaire * item_data.quantite
@@ -1129,19 +1065,13 @@ class CommandeService:
         reason: str,
         items_refund: Optional[List[uuid.UUID]] = None,
         initiated_by: Optional[uuid.UUID] = None,
+        restock: bool = False,
     ) -> CommandeRefund:
         commande = self.commande_repo.get(str(commande_id))
         if not commande:
             raise NotFoundError("Commande not found")
         if amount <= 0:
             raise ValidationError("Refund amount must be positive")
-        max_refundable = (commande.total or Decimal("0")) - (
-            commande.refunded_amount or Decimal("0")
-        )
-        if amount > max_refundable:
-            raise BusinessLogicError(
-                f"Refund amount {amount} exceeds refundable balance {max_refundable}"
-            )
         if commande.statut not in {
             CommandeStatut.PAYEE.value,
             CommandeStatut.SERVIE.value,
@@ -1149,10 +1079,37 @@ class CommandeService:
             raise BusinessLogicError(
                 "Refund can only be requested on paid or served commandes"
             )
+        # Plafond = total - deja rembourse - demandes en attente. Sans les demandes
+        # en attente, deux demandes successives pouvaient chacune passer le plafond
+        # puis depasser ensemble le total de la commande.
+        pending = self.refund_repo.pending_amount(commande_id)
+        max_refundable = (
+            (commande.total or Decimal("0"))
+            - (commande.refunded_amount or Decimal("0"))
+            - pending
+        )
+        if amount > max_refundable:
+            raise BusinessLogicError(
+                f"Refund amount {amount} exceeds refundable balance {max_refundable}"
+            )
+
+        item_ids = list(dict.fromkeys(items_refund or []))
+        if restock and not item_ids:
+            raise ValidationError(
+                "remettre_en_stock requires item_ids: say which items go back on the shelf"
+            )
+        for item_id in item_ids:
+            item = self.item_repo.get(str(item_id))
+            if not item or item.commande_id != commande_id:
+                raise ValidationError(f"Item {item_id} does not belong to this commande")
+            if (item.refunded_quantity or 0) >= item.quantite:
+                raise BusinessLogicError(f"Item {item_id} is already refunded")
 
         notes = {}
-        if items_refund:
-            notes["items_refund"] = [str(i) for i in items_refund]
+        if item_ids:
+            notes["items_refund"] = [str(i) for i in item_ids]
+        if restock:
+            notes["restock"] = True
 
         refund = self.commande_repo.create_refund(
             commande_id=commande_id,
@@ -1191,17 +1148,55 @@ class CommandeService:
         if not commande:
             raise NotFoundError("Commande not found for refund")
 
-        self._deduct_stock_for_commande(commande.id, inverse=True)
+        refund_amount = Decimal(str(refund.amount))
+        already_refunded = commande.refunded_amount or Decimal("0")
+        if already_refunded + refund_amount > (commande.total or Decimal("0")):
+            raise BusinessLogicError(
+                "Approving this refund would refund more than the commande total"
+            )
 
-        new_refunded = (commande.refunded_amount or Decimal("0")) + Decimal(
-            str(refund.amount)
+        notes = refund.notes_jsonb or {}
+        item_ids = []
+        for raw in notes.get("items_refund", []):
+            try:
+                item_ids.append(uuid.UUID(raw))
+            except ValueError:
+                continue
+        items = [
+            i
+            for i in (self.item_repo.get(str(i)) for i in item_ids)
+            if i is not None and i.commande_id == commande.id
+        ]
+
+        # Un plat prepare ne retourne pas en rayon : on ne remet en stock que sur
+        # decision explicite (remettre_en_stock) et seulement pour les articles
+        # nommes, et seulement la part pas encore remboursee.
+        if notes.get("restock") and items:
+            returned = merge_requirements(
+                *[
+                    scale_requirements(
+                        requirements_from_json(
+                            (i.details_jsonb or {}).get("stock_requirements")
+                        ),
+                        Decimal(str(i.quantite - (i.refunded_quantity or 0)))
+                        / Decimal(str(i.quantite)),
+                    )
+                    for i in items
+                ]
+            )
+            if returned:
+                self.stock_engine.restock(
+                    returned, "refund", refund.id, "Remise en stock apres remboursement"
+                )
+        for item in items:
+            item.refunded_quantity = item.quantite
+
+        new_refunded = already_refunded + refund_amount
+        overall_status = (
+            RefundStatus.COMPLETED.value
+            if new_refunded >= (commande.total or Decimal("0"))
+            else RefundStatus.PARTIAL.value
         )
-        remaining = (commande.total or Decimal("0")) - new_refunded
-        if remaining <= 0:
-            overall_status = RefundStatus.COMPLETED.value
-        else:
-            overall_status = RefundStatus.PARTIAL.value
-
         now = datetime.now(timezone.utc)
         self.refund_repo.update_status(
             refund.id,
@@ -1217,16 +1212,6 @@ class CommandeService:
             refunded_by=processed_by,
             refunded_at=now,
         )
-
-        item_ids = (refund.notes_jsonb or {}).get("items_refund", [])
-        for item_str in item_ids:
-            try:
-                item_uuid = uuid.UUID(item_str)
-            except Exception:
-                continue
-            item = self.item_repo.get(str(item_uuid))
-            if item and str(item.commande_id) == str(commande.id):
-                item.refunded_quantity = item.quantite
 
         logger.info(f"Refund approved: {refund_id} by {processed_by}")
         self.db.flush()

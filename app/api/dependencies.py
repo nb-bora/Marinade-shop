@@ -389,6 +389,22 @@ def _path_tenant_ids(request: Request, db: Session) -> List[uuid.UUID]:
     return tenant_ids
 
 
+def has_tenant_role(
+    db: Session,
+    user: User,
+    tenant_id: uuid.UUID,
+    accepted_roles: Iterable[Union[StaffRole, str]],
+) -> bool:
+    """True si l'utilisateur a l'un de ces roles dans ce restaurant.
+
+    Contrairement a ``ensure_tenant_role`` il ne leve rien quand le role manque :
+    il sert a adapter un comportement (ex. prix libre reserve au management) sans
+    refuser toute la requete. Un utilisateur sans aucun lien avec le restaurant
+    recoit toujours 404.
+    """
+    return _authorize_tenant(db, user, tenant_id).allows(accepted_roles)
+
+
 def require_staff_role(accepted_roles: Iterable[Union[StaffRole, str]]):
     """Dependency factory: the caller must hold one of ``accepted_roles`` on the
     restaurant targeted by the request (path, owned resource, or X-Tenant-ID).

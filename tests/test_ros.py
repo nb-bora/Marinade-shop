@@ -546,7 +546,7 @@ def test_sc8_automatic_stock_deduction(client, auth_headers, test_restaurant):
         db.query(StockMouvement).filter(StockMouvement.composant_id == comp.id).first()
     )
     assert mvt is not None
-    assert mvt.type == "SORTIE"
+    assert mvt.type == "sortie"
     assert float(mvt.quantite) == 8.00
 
     # 5. Verify Audit Log entry for low stock alert

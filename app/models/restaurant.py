@@ -214,6 +214,9 @@ class StockComposant(Base):
         Index("idx_stock_composant", "composant_id"),
         CheckConstraint("quantite >= 0", name="check_stock_quantite_positive"),
         CheckConstraint("reservee >= 0", name="check_stock_reservee_positive"),
+        CheckConstraint(
+            "reservee <= quantite", name="check_stock_reservee_within_quantite"
+        ),
         CheckConstraint("seuil_alerte >= 0", name="check_stock_seuil_positive"),
     )
 
@@ -323,6 +326,14 @@ class Boisson(Base):
     disponible = Column(Boolean, default=True)
     category = Column(String(50), nullable=True)
     attributs_jsonb = Column(JSONB, nullable=True)
+    # Stock : une boisson peut consommer un composant (une bouteille, une dose).
+    # Sans lien, elle se vend sans mouvement de stock.
+    composant_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("composants.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    stock_par_vente = Column(Numeric(12, 3), default=1, nullable=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(
@@ -330,6 +341,10 @@ class Boisson(Base):
     )
 
     __table_args__ = (
+        Index("idx_boisson_composant", "composant_id"),
+        CheckConstraint(
+            "stock_par_vente > 0", name="check_boisson_stock_par_vente_positive"
+        ),
         Index("idx_boisson_restaurant", "restaurant_id"),
         Index("idx_boisson_disponible", "disponible"),
         Index("idx_boisson_category", "category"),

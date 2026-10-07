@@ -263,9 +263,14 @@ class RosPaymentTransaction(Base):
     idempotency_key = Column(
         UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4
     )
+    # Qui a encaissé : la clôture de caisse ne compte que les espèces de l'opérateur.
+    received_by = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
+        Index("idx_ros_pay_cash_operator", "restaurant_id", "received_by", "created_at"),
         Index("idx_ros_pay_restaurant", "restaurant_id"),
         Index("idx_ros_pay_invoice", "invoice_id"),
         Index(
