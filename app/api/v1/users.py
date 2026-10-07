@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from app.core.database import get_db
 from app.services.user_service import UserService
-from app.schemas.user import UserResponse, UserCreate, UserUpdate
+from app.schemas.user import RestaurantAccess, UserResponse, UserCreate, UserUpdate
+from app.services.access_service import AccessService
 from app.api.dependencies import get_current_user, require_admin
 import uuid
 
@@ -51,6 +52,30 @@ def get_users(
 )
 def get_current_user_info(current_user=Depends(get_current_user)):
     return current_user
+
+
+@router.get(
+    "/me/access",
+    response_model=List[RestaurantAccess],
+    summary="Mes restaurants et ce que j'y peux faire",
+    description="""
+    Liste les restaurants auxquels le compte a accès : celui dont il est propriétaire, ceux où il est
+    membre de l'équipe, ou tous pour un administrateur de la plateforme.
+
+    Chaque entrée porte ses `capabilities` (`management`, `stock`, `front_of_house`, `cash_desk`,
+    `production`, `reservations`), calculées par la politique d'accès du serveur : un client
+    s'appuie sur elles pour n'afficher que ce que l'utilisateur peut faire, sans connaître les rôles.
+    Le restaurant choisi se transmet ensuite dans l'en-tête `X-Tenant-ID`.
+    """,
+    responses={401: {"description": "Token absent ou invalide."}},
+)
+def get_my_access(
+    q: Optional[str] = Query(None, max_length=100, description="Filtre sur le nom"),
+    limit: int = Query(50, ge=1, le=100),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return AccessService(db).list_for(current_user, query=q, limit=limit)
 
 
 @router.get(

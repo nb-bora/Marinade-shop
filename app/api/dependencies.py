@@ -205,6 +205,12 @@ def _set_requested_tenant(db: Session, user: User, request: Request) -> None:
         _authorize_tenant(db, user, tenant_id)
         return
 
+    if user.role == "admin":
+        # Un administrateur de la plateforme n'a pas de restaurant « par défaut » : sans
+        # en-tête explicite, aucun contexte n'est établi et les routes réclament un
+        # restaurant_id. Chercher parmi ses propres restaurants n'aurait pas de sens.
+        return
+
     rows = db.execute(_DEFAULT_TENANT_SQL, {"user": str(user.id)}).all()
     owned = next((r for r in rows if r.kind == "owner"), None)
     if owned is not None:
@@ -285,8 +291,7 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     user = _load_active_user(db, _user_id_from_access_token(credentials.credentials))
-    if user.role != "admin":
-        _set_requested_tenant(db, user, request)
+    _set_requested_tenant(db, user, request)
     return user
 
 

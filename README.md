@@ -174,7 +174,7 @@ Le fichier `.env` est ignoré par git. Toutes les variables sont décrites dans 
 
 ```powershell
 python -m alembic upgrade head
-python -m alembic current      # doit afficher 20260928_1100 (head)
+python -m alembic current      # doit afficher 20260928_1200 (head)
 ```
 
 Alembic utilise `MIGRATION_DATABASE_URL` si elle est définie, sinon la connexion de l'application.
@@ -234,6 +234,24 @@ Copie l'`access_token`, clique sur **Authorize** dans Swagger et colle-le. Crée
 ```http
 POST /v1/restaurants
 { "name": "Chez Marinade", "currency": "XAF", "city": "Douala", "country": "Cameroun", "taux_service": 10 }
+```
+
+### 8. Données de démonstration
+
+Pour tester tout de suite, avec l'interface web (`Marinade-web`) ou Swagger :
+
+```powershell
+.\venv\Scripts\python.exe -m scripts.seed_demo --with-payments   # --reset pour repartir de zéro
+```
+
+Le script crée un super-admin, deux restaurants (l'un complet, avec propriétaire, manager, caissier, serveur, chef et barman ; l'autre pour vérifier l'isolation), une carte, des tables et, avec `--with-payments`, des paiements Mobile Money aux statuts variés. Il est idempotent, n'efface que les comptes `@demo.marinade.test` et refuse de tourner en production. Les mots de passe affichés sont publics : développement uniquement.
+
+### 9. Interface web
+
+Le front (`../Marinade-web`) génère ses types depuis le contrat OpenAPI de l'API. Après toute évolution d'une route ou d'un schéma :
+
+```powershell
+.\venv\Scripts\python.exe -m scripts.export_openapi ..\Marinade-web\api\openapi.json
 ```
 
 ## Configuration
@@ -387,7 +405,13 @@ Chaque table métier porte un `restaurant_id`. Le restaurant visé par une requ�
 2. à défaut, l'en-tête `X-Tenant-ID` ;
 3. à défaut, le restaurant dont l'utilisateur est propriétaire, ou son unique appartenance.
 
-Un utilisateur membre de plusieurs restaurants **doit** envoyer `X-Tenant-ID`. Un restaurant auquel l'utilisateur n'a aucun accès répond `404` (et non `403`) pour ne pas en révéler l'existence.
+Un utilisateur membre de plusieurs restaurants **doit** envoyer `X-Tenant-ID`. Un administrateur de la plateforme n'a pas de restaurant par défaut : il désigne le restaurant par `X-Tenant-ID` (ou par l'URL), sinon les routes qui en dépendent répondent `400`. Un restaurant auquel l'utilisateur n'a aucun accès répond `404` (et non `403`) pour ne pas en révéler l'existence.
+
+### Où ai-je accès, et pour quoi faire ?
+
+`GET /v1/users/me/access` liste les restaurants du compte (propriétaire, membre actif, ou tous pour un administrateur, avec filtre `q` et `limit` ≤ 100) et, pour chacun, ses **capacités** : `management`, `stock`, `front_of_house`, `cash_desk`, `production`, `reservations`. Elles sont calculées par `app/api/permissions.py`, la même politique qui protège les routes : un client n'a donc jamais à recopier la table des rôles. Le contrat OpenAPI et cette politique sont tenus égaux par une assertion au démarrage.
+
+Pour qu'un employé voie le restaurant dont il est membre sans en connaître l'identifiant, la migration `20260928_1200` ajoute une politique **en lecture seule** sur `restaurants` (`FOR SELECT`, membres actifs). Elle n'ouvre aucune écriture ; un test vérifie qu'un membre ne peut pas modifier le restaurant par ce biais.
 
 ### Deux couches de protection
 
@@ -688,6 +712,7 @@ Toutes les routes sont préfixées par `/v1`. Toute route de liste accepte `?ski
 | Méthode | Route | Accès |
 |---|---|---|
 | GET | `/users/me` | membre |
+| GET | `/users/me/access` | membre (ses restaurants et capacités) |
 | GET, POST, PUT, DELETE | `/users`, `/users/{user_id}` | admin |
 | GET | `/subscriptions/tiers`, `/subscriptions/tiers/{tier_id}` | public |
 | POST, PUT | `/subscriptions/tiers`, `/subscriptions/tiers/{tier_id}` | admin |
@@ -799,6 +824,7 @@ Relire toute migration générée avant de l'appliquer. Les migrations s'exécut
 | `20260927_1100` | Boisson liée à un composant de stock, opérateur sur les encaissements, contrainte `réservé ≤ quantité` |
 | `20260928_1000` | Préfixe de référence unique par restaurant, frais et date de fin des paiements, index d'historique |
 | `20260928_1100` | Politiques RLS évaluées une fois par requête (InitPlan) |
+| `20260928_1200` | Lecture seule de `restaurants` pour les membres de l'équipe |
 
 ## Tests
 
@@ -824,6 +850,7 @@ Ces suites appellent l'API contre PostgreSQL avec le **rôle applicatif**, donc 
 | `tests/test_api_integration.py` | 47 | Toutes les routes, l'isolation entre restaurants, les droits par rôle, la 2FA |
 | `tests/test_query_budget.py` | 12 | Nombre de requêtes constant, pagination bornée, recommandations évaluées par la base |
 | `tests/test_stock_and_payment_consistency.py` | 40 | Cycle de vie du stock, remboursements, prix serveur, encaissements, caisse, synchronisation, concurrence |
+| `tests/test_user_access.py` | 17 | Restaurants et capacités par rôle, isolation, admin et `X-Tenant-ID`, politique en lecture seule |
 | `tests/test_payment_history.py` | 28 | Historique par restaurant, curseur, filtres, résumé, rafraîchissement, isolation entre restaurants |
 | `tests/test_rls_audit.py` | 13 | RLS forcée partout, politiques complètes, isolement vérifié table par table |
 
@@ -833,7 +860,7 @@ Elles s'ignorent sans `TEST_DATABASE_URL`. Cette URL doit viser une base **jetab
 # 1. créer la base jetable et la migrer (voir Démarrage rapide, avec marinade_test comme nom)
 # 2. lancer
 $env:TEST_DATABASE_URL = "postgresql://marinade_app:...@localhost:5432/marinade_test"
-python -m pytest tests/test_api_integration.py tests/test_query_budget.py tests/test_stock_and_payment_consistency.py tests/test_payment_history.py tests/test_rls_audit.py -q
+python -m pytest tests/test_api_integration.py tests/test_query_budget.py tests/test_stock_and_payment_consistency.py tests/test_payment_history.py tests/test_user_access.py tests/test_rls_audit.py -q
 ```
 
 ### Scénarios ROS d'intégration

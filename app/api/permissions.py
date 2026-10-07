@@ -8,7 +8,10 @@ Les rôles viennent de ``restaurant_members.staff_role`` (et, pour les anciennes
 lignes, de ``restaurant_members.role``).
 """
 
-from app.api.dependencies import require_staff_role
+from typing import get_args
+
+from app.api.dependencies import TenantAccess, require_staff_role
+from app.schemas.user import Capability
 from app.utils.enums import StaffRole as R
 
 # Prix, carte, recettes, plan de salle : tout ce qui change ce que le restaurant
@@ -44,3 +47,27 @@ RESERVATION_DESK = require_staff_role(RESERVATION_ROLES)
 
 # Décision sur un remboursement : réservée au management.
 REFUND_DECISION = MANAGEMENT
+
+# Capacités exposées au client (GET /users/me/access). Le front ne connaît jamais les
+# rôles : il demande « puis-je gérer le stock ici ? ». Ajouter un ensemble de rôles
+# ci-dessus et l'inscrire ici suffit pour qu'une interface puisse s'en servir.
+CAPABILITY_ROLES = {
+    "management": MANAGEMENT_ROLES,
+    "stock": STOCK_ROLES,
+    "front_of_house": FRONT_OF_HOUSE_ROLES,
+    "cash_desk": CASH_DESK_ROLES,
+    "production": PRODUCTION_ROLES,
+    "reservations": RESERVATION_ROLES,
+}
+
+
+# Le contrat OpenAPI (schemas.user.Capability) et cette table doivent rester identiques :
+# l'écart ferait renvoyer au client une capacité qu'il ne connaît pas.
+assert set(CAPABILITY_ROLES) == set(get_args(Capability)), "Capability et CAPABILITY_ROLES divergent"
+
+
+def capabilities_of(access: TenantAccess) -> list[str]:
+    """Capacités d'un utilisateur dans un restaurant, calculées par la politique elle-même."""
+    return sorted(
+        name for name, roles in CAPABILITY_ROLES.items() if access.allows(roles)
+    )

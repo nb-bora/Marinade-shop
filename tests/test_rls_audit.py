@@ -114,7 +114,9 @@ class TestRlsStructure:
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "select c.relname, p.polname, p.polqual is null as no_using, p.polwithcheck is null as no_check"
+                    "select c.relname, p.polname, p.polqual is null as no_using,"
+                    # Une politique FOR SELECT n'a pas de WITH CHECK par nature : elle n'écrit rien.
+                    " (p.polwithcheck is null and p.polcmd <> 'r') as no_check"
                     " from pg_policy p join pg_class c on c.oid = p.polrelid"
                 )
             ).all()

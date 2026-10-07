@@ -143,6 +143,23 @@ class TwoFactorRecoveryCodesResponse(BaseModel):
     recovery_codes: List[str]
 
 
+Capability = Literal[
+    "management", "stock", "front_of_house", "cash_desk", "production", "reservations"
+]
+
+
+class RestaurantAccess(BaseModel):
+    """Un restaurant auquel l'utilisateur a accès, et ce qu'il peut y faire."""
+
+    restaurant_id: uuid.UUID
+    name: str
+    city: Optional[str] = None
+    currency: str
+    relation: Literal["owner", "member", "platform_admin"]
+    roles: List[str]
+    capabilities: List[Capability]
+
+
 class PasswordConfirmRequest(BaseModel):
     """Ré-authentification pour les opérations sensibles du compte (2FA)."""
 
