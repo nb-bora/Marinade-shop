@@ -99,6 +99,7 @@ class ReservationRepository(BaseRepository[Reservation]):
         exclude_reservation_id: Optional[uuid.UUID] = None,
     ) -> List[Reservation]:
         q = self.db.query(Reservation).filter(
+            Reservation.deleted_at.is_(None),
             Reservation.table_id == table_id,
             Reservation.status.notin_(
                 [ReservationStatus.CANCELLED.value, ReservationStatus.NO_SHOW.value]
@@ -118,7 +119,8 @@ class ReservationRepository(BaseRepository[Reservation]):
         filters: Optional[ReservationListFilters] = None,
     ) -> List[Reservation]:
         q = self.db.query(Reservation).filter(
-            Reservation.restaurant_id == restaurant_id
+            Reservation.restaurant_id == restaurant_id,
+            Reservation.deleted_at.is_(None),
         )
         if filters:
             if filters.date_debut is not None:

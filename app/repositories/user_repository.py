@@ -1,5 +1,6 @@
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.models.user import User
 from app.repositories.base import BaseRepository
@@ -8,6 +9,35 @@ from app.repositories.base import BaseRepository
 class UserRepository(BaseRepository[User]):
     def __init__(self, db: Session):
         super().__init__(User, db)
+
+    def get_all(self, skip: int = 0, limit: int = 100) -> List[User]:
+        """Comptes non supprimés, dans un ordre stable (deux pages ne se recoupent pas)."""
+        return (
+            self.db.query(User)
+            .filter(User.is_deleted.is_(False))
+            .order_by(User.created_at, User.id)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+
+    def count_active(self) -> int:
+        return (
+            self.db.query(func.count(User.id)).filter(User.is_deleted.is_(False)).scalar()
+            or 0
+        )
+
+    def delete(self, id: str) -> Optional[User]:
+        """Suppression logique : le compte est conservé (historique, audit, clés
+        étrangères) mais désactivé et masqué des listes."""
+        user = self.get(id)
+        if user is None or user.is_deleted:
+            return None
+        user.is_deleted = True
+        user.is_active = False
+        user.deleted_at = datetime.now(timezone.utc)
+        self.db.flush()
+        return user
 
     def get_by_email(self, email: str) -> Optional[User]:
         return self.db.query(User).filter(User.email == email).first()

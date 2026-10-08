@@ -83,11 +83,26 @@ def get_session_local():
     )
 
 
+def _drain_kds_events(db: Session) -> list:
+    # Import tardif : ws_manager importe les modèles, qui importent ce module.
+    from app.utils.ws_manager import drain_kds_events
+
+    return drain_kds_events(db)
+
+
+def _publish_kds_events(events: list) -> None:
+    from app.utils.ws_manager import publish_kds_events
+
+    publish_kds_events(events)
+
+
 def get_db() -> Session:
     db = get_session_local()()
     try:
         yield db
+        kds_events = _drain_kds_events(db)
         db.commit()
+        _publish_kds_events(kds_events)
     except Exception:
         db.rollback()
         raise

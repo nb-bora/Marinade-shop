@@ -1,7 +1,19 @@
 from app.api.dependencies import get_current_user, require_admin, require_tenant_path
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
+from pydantic import BaseModel, Field
 from app.core.database import get_db
 from app.services.restaurant_service import (
     RestaurantService,
@@ -52,6 +64,9 @@ from app.schemas.restaurant import (
     CommandeItemCreate,
     CommandeRefundCreate,
     CommandeRefundResponse,
+    CatalogImportResponse,
+    EasyTransactSettings,
+    RestaurantConfigResponse,
 )
 from app.utils.logging import get_logger
 import uuid
@@ -1191,6 +1206,65 @@ _LEGACY_DEPRECATED_NOTICE = (
 )
 
 
+class RefundRejectBody(BaseModel):
+    """Corps optionnel du rejet ; le motif peut aussi venir de `?reason=`."""
+
+    reason: Optional[str] = Field(None, max_length=500)
+    raison: Optional[str] = Field(
+        None, max_length=500, description="Alias français de `reason`"
+    )
+
+
+def _commandes_out(db: Session, commandes) -> List[CommandeResponse]:
+    """Commandes avec leurs lignes et remboursements, en 2 requêtes quelle que soit la taille.
+
+    Le modèle `Commande` ne porte pas de relation : sans cela `items` et
+    `remboursements` restaient toujours vides dans la réponse.
+    """
+    from app.repositories.restaurant_repository import (
+        CommandeItemRepository,
+        CommandeRefundRepository,
+    )
+
+    ids = [c.id for c in commandes]
+    items = CommandeItemRepository(db).get_by_commande_ids(ids)
+    refunds = CommandeRefundRepository(db).get_by_commande_ids(ids)
+    out = []
+    for commande in commandes:
+        response = CommandeResponse.model_validate(commande)
+        out.append(
+            response.model_copy(
+                update={
+                    "items": [
+                        CommandeItemResponse.model_validate(i)
+                        for i in items.get(commande.id, [])
+                    ],
+                    "remboursements": [
+                        _refund_out(r, commande.restaurant_id)
+                        for r in refunds.get(commande.id, [])
+                    ],
+                }
+            )
+        )
+    return out
+
+
+def _commande_out(db: Session, commande) -> CommandeResponse:
+    return _commandes_out(db, [commande])[0]
+
+
+def _commande_of_restaurant(
+    service: CommandeService, restaurant_id: uuid.UUID, commande_id: uuid.UUID
+):
+    """La commande, à condition qu'elle appartienne à ce restaurant (sinon 404)."""
+    commande = service.get_commande(commande_id)
+    if commande is None or commande.restaurant_id != restaurant_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Commande not found"
+        )
+    return commande
+
+
 @router.post(
     "/{restaurant_id}/commandes",
     dependencies=[Depends(perm.FRONT_OF_HOUSE)],
@@ -1215,7 +1289,9 @@ def create_commande(
 ):
     commande_service = CommandeService(db)
     try:
-        return commande_service.create_commande(commande_data, restaurant_id)
+        return _commande_out(
+            db, commande_service.create_commande(commande_data, restaurant_id)
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -1236,8 +1312,9 @@ def get_restaurant_commandes(
     _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
-    return commande_service.get_restaurant_commandes(
-        restaurant_id, page.skip, page.limit
+    return _commandes_out(
+        db,
+        commande_service.get_restaurant_commandes(restaurant_id, page.skip, page.limit),
     )
 
 
@@ -1261,7 +1338,10 @@ def get_active_commandes(
     _dep=Depends(_mark_deprecated_commande),
 ):
     commande_service = CommandeService(db)
-    return commande_service.get_active_commandes(restaurant_id, page.skip, page.limit)
+    return _commandes_out(
+        db,
+        commande_service.get_active_commandes(restaurant_id, page.skip, page.limit),
+    )
 
 
 @router.get(
@@ -1288,7 +1368,7 @@ def get_commande(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Commande not found"
         )
-    return commande
+    return _commande_out(db, commande)
 
 
 @router.put(
@@ -1321,7 +1401,7 @@ def update_commande(
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail="Commande not found"
             )
-        return updated_commande
+        return _commande_out(db, updated_commande)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -1496,15 +1576,398 @@ def reject_refund(
     commande_id: uuid.UUID,
     refund_id: uuid.UUID,
     reason: str = "",
+    body: Optional[RefundRejectBody] = Body(None),
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     service = CommandeService(db)
     service.get_refund(commande_id, refund_id)
+    # Le motif vient du corps (`reason` ou `raison`) ou, à défaut, de `?reason=`.
+    final_reason = (body and (body.reason or body.raison)) or reason
     try:
         refund = service.reject_refund(
-            refund_id, reason=reason, processed_by=current_user.id
+            refund_id, reason=final_reason, processed_by=current_user.id
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     return _refund_out(refund, service.get_commande(commande_id).restaurant_id)
+
+
+# --------------------------------------------------------------------------- #
+# Routes imbriquées sous le restaurant : /restaurants/{restaurant_id}/commandes/...
+# Elles vérifient que la commande appartient bien à CE restaurant (404 sinon) et
+# réutilisent la logique des routes historiques ci-dessus.
+# --------------------------------------------------------------------------- #
+@router.get(
+    "/{restaurant_id}/commandes/{commande_id}",
+    response_model=CommandeResponse,
+    tags=["restaurant-orders"],
+    summary="Détails d’une commande, avec ses lignes et remboursements",
+)
+def get_restaurant_commande(
+    restaurant_id: uuid.UUID, commande_id: uuid.UUID, db: Session = Depends(get_db)
+):
+    commande = _commande_of_restaurant(CommandeService(db), restaurant_id, commande_id)
+    return _commande_out(db, commande)
+
+
+@router.get(
+    "/{restaurant_id}/commandes/{commande_id}/items",
+    response_model=List[CommandeItemResponse],
+    tags=["restaurant-orders"],
+    summary="Lignes d’une commande",
+)
+def get_restaurant_commande_items(
+    restaurant_id: uuid.UUID, commande_id: uuid.UUID, db: Session = Depends(get_db)
+):
+    service = CommandeService(db)
+    _commande_of_restaurant(service, restaurant_id, commande_id)
+    return service.get_commande_items(commande_id)
+
+
+@router.get(
+    "/{restaurant_id}/commandes/{commande_id}/refunds",
+    response_model=List[CommandeRefundResponse],
+    tags=["restaurant-orders-refunds"],
+    summary="Remboursements d’une commande",
+)
+def get_restaurant_commande_refunds(
+    restaurant_id: uuid.UUID, commande_id: uuid.UUID, db: Session = Depends(get_db)
+):
+    service = CommandeService(db)
+    _commande_of_restaurant(service, restaurant_id, commande_id)
+    return [_refund_out(r, restaurant_id) for r in service.get_refunds(commande_id)]
+
+
+@router.post(
+    "/{restaurant_id}/commandes/{commande_id}/refunds",
+    dependencies=[Depends(perm.CASH_DESK)],
+    response_model=CommandeRefundResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["restaurant-orders-refunds"],
+    summary="Demander un remboursement (route imbriquée)",
+)
+def request_restaurant_refund(
+    restaurant_id: uuid.UUID,
+    commande_id: uuid.UUID,
+    refund_data: CommandeRefundCreate,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _commande_of_restaurant(CommandeService(db), restaurant_id, commande_id)
+    return request_refund(commande_id, refund_data, current_user, db)
+
+
+@router.post(
+    "/{restaurant_id}/commandes/{commande_id}/refunds/{refund_id}/approve",
+    dependencies=[Depends(perm.REFUND_DECISION)],
+    response_model=CommandeRefundResponse,
+    tags=["restaurant-orders-refunds"],
+    summary="Approuver un remboursement (route imbriquée)",
+)
+def approve_restaurant_refund(
+    restaurant_id: uuid.UUID,
+    commande_id: uuid.UUID,
+    refund_id: uuid.UUID,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _commande_of_restaurant(CommandeService(db), restaurant_id, commande_id)
+    return approve_refund(commande_id, refund_id, current_user, db)
+
+
+@router.post(
+    "/{restaurant_id}/commandes/{commande_id}/refunds/{refund_id}/reject",
+    dependencies=[Depends(perm.REFUND_DECISION)],
+    response_model=CommandeRefundResponse,
+    tags=["restaurant-orders-refunds"],
+    summary="Rejeter un remboursement (motif en `?reason=` ou dans le corps)",
+)
+def reject_restaurant_refund(
+    restaurant_id: uuid.UUID,
+    commande_id: uuid.UUID,
+    refund_id: uuid.UUID,
+    reason: str = "",
+    body: Optional[RefundRejectBody] = Body(None),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _commande_of_restaurant(CommandeService(db), restaurant_id, commande_id)
+    return reject_refund(commande_id, refund_id, reason, body, current_user, db)
+
+
+# --------------------------------------------------------------------------- #
+# Configuration, import et export du catalogue
+# --------------------------------------------------------------------------- #
+_SECRET_KEY_PARTS = (
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "credential",
+    "private",
+)
+_IMPORT_ACTION = "CATALOG_IMPORT"
+_IMPORT_INTERVAL_SECONDS = 60
+_XLSX_MEDIA_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+
+def _strip_secrets(value):
+    """Retire récursivement toute clé qui ressemble à un secret avant de répondre."""
+    if isinstance(value, dict):
+        return {
+            k: _strip_secrets(v)
+            for k, v in value.items()
+            if not any(part in str(k).lower() for part in _SECRET_KEY_PARTS)
+        }
+    if isinstance(value, list):
+        return [_strip_secrets(v) for v in value]
+    return value
+
+
+@router.get(
+    "/{restaurant_id}/config",
+    dependencies=[Depends(perm.MANAGEMENT)],
+    response_model=RestaurantConfigResponse,
+    tags=["restaurants"],
+    summary="Configuration d’un restaurant (horaires, taux de service, Easy Transact)",
+    description="""
+    Rassemble en une lecture la configuration JSON du restaurant : horaires d'ouverture,
+    taux de service, `config_jsonb` (toute clé ressemblant à un secret est retirée) et les
+    réglages Easy Transact. Ces derniers ne contiennent jamais de secret : seuls les NOMS des
+    variables d'environnement (`credential_env_key`, `webhook_secret_env_key`) sont exposés.
+
+    Réservé au management du restaurant.
+    """,
+    responses={404: {"description": "Restaurant introuvable ou hors de portée."}},
+)
+def get_restaurant_config(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
+    from app.models.payment import PaymentConfiguration
+
+    restaurant = RestaurantService(db).get_restaurant(restaurant_id)
+    if restaurant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Restaurant not found"
+        )
+    payment = (
+        db.query(PaymentConfiguration)
+        .filter(
+            PaymentConfiguration.restaurant_id == restaurant_id,
+            PaymentConfiguration.provider == "easytransact",
+        )
+        .first()
+    )
+    return RestaurantConfigResponse(
+        restaurant_id=restaurant.id,
+        currency=restaurant.currency,
+        taux_service=restaurant.taux_service,
+        horaires_ouverture=restaurant.horaires_ouverture,
+        config=_strip_secrets(restaurant.config_jsonb or {}),
+        easytransact=EasyTransactSettings.model_validate(payment) if payment else None,
+    )
+
+
+def _enforce_import_rate_limit(db: Session, restaurant_id: uuid.UUID) -> None:
+    """Un import par minute et par restaurant, partagé entre tous les workers.
+
+    Le dernier import est lu dans le journal d'audit (donc en base, pas en mémoire de
+    processus) ; un verrou consultatif sérialise deux requêtes simultanées.
+    """
+    from sqlalchemy import text
+
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+        {"key": f"catalog_import:{restaurant_id}"},
+    )
+    remaining = db.execute(
+        text(
+            "SELECT CEIL(:interval - EXTRACT(EPOCH FROM (now() - max(created_at)))) "
+            "FROM ros_audit_logs WHERE restaurant_id = :rid AND action = :action "
+            "AND created_at > now() - make_interval(secs => :interval)"
+        ),
+        {
+            "rid": restaurant_id,
+            "action": _IMPORT_ACTION,
+            "interval": _IMPORT_INTERVAL_SECONDS,
+        },
+    ).scalar()
+    if remaining is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Un seul import par minute et par restaurant",
+            headers={"Retry-After": str(max(int(remaining), 1))},
+        )
+
+
+def _read_upload(file: UploadFile) -> bytes:
+    from app.services.catalog_io_service import MAX_FILE_BYTES
+
+    content = file.file.read(MAX_FILE_BYTES + 1)
+    if len(content) > MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Fichier trop volumineux (5 Mo maximum)",
+        )
+    return content
+
+
+def _run_import(db, restaurant_id, current_user, file_format, import_type, importer):
+    """Limite, exécute, journalise. Toute erreur de FICHIER annule tout (400)."""
+    from app.repositories.ros_repository import RosAuditLogRepository
+    from app.services.catalog_io_service import FileFormatError
+
+    _enforce_import_rate_limit(db, restaurant_id)
+    try:
+        result = importer()
+    except FileFormatError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    RosAuditLogRepository(db).log_action(
+        restaurant_id=restaurant_id,
+        action=_IMPORT_ACTION,
+        entity_name="Restaurant",
+        entity_id=restaurant_id,
+        actor_id=current_user.id,
+        after_state={
+            "format": file_format,
+            "type": import_type,
+            "created": result.created,
+            "updated": result.updated,
+            "errors": len(result.errors),
+        },
+    )
+    logger.info(
+        "Catalog import (%s/%s) restaurant=%s user=%s created=%s updated=%s errors=%s",
+        file_format,
+        import_type,
+        restaurant_id,
+        current_user.id,
+        result.created,
+        result.updated,
+        len(result.errors),
+    )
+    return result.as_dict()
+
+
+@router.post(
+    "/{restaurant_id}/import-csv",
+    dependencies=[Depends(perm.MANAGEMENT)],
+    response_model=CatalogImportResponse,
+    tags=["restaurant-catalog-io"],
+    summary="Importer plats, boissons, composants ou recettes depuis un CSV",
+    description="""
+    Fichier CSV : séparateur `;`, UTF-8 (BOM accepté), première ligne d'en-tête.
+
+    Le paramètre `type` choisit le contenu :
+
+    | type | en-tête |
+    |---|---|
+    | `catalogue` (défaut) | `type;nom;prix;description;code;disponible;stock_min;stock_max;composition` — `type` vaut `plat` ou `boisson` et aiguille chaque ligne |
+    | `plats`, `boissons` | idem (`type` facultatif) |
+    | `composants` | `nom;prix;stock;composition;valeur_calorique` |
+    | `recettes` | `plat;composant;quantite;unite` |
+
+    L'import est idempotent (clé : nom, sans la casse) et partiel : les lignes valides sont
+    enregistrées, les autres reviennent dans `errors` avec leur numéro de ligne.
+    `composition` d'un plat : `Riz|Poulet:2` (noms de composants existants, quantité facultative).
+    Une erreur de fichier (colonne manquante, encodage, taille) répond 400 sans rien enregistrer.
+    Limite : 1 import par minute et par restaurant (429 + `Retry-After`).
+    """,
+    responses={
+        400: {"description": "Fichier inutilisable (en-tête, encodage, séparateur)."},
+        413: {"description": "Fichier de plus de 5 Mo."},
+        429: {"description": "Un import a déjà eu lieu dans la dernière minute."},
+    },
+)
+def import_restaurant_csv(
+    restaurant_id: uuid.UUID,
+    file: UploadFile = File(...),
+    import_type: str = Query("catalogue", alias="type"),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.services import catalog_io_service as catalog_io
+
+    content = _read_upload(file)
+    return _run_import(
+        db,
+        restaurant_id,
+        current_user,
+        "csv",
+        import_type,
+        lambda: catalog_io.import_csv(db, restaurant_id, content, import_type),
+    )
+
+
+@router.post(
+    "/{restaurant_id}/import-excel",
+    dependencies=[Depends(perm.MANAGEMENT)],
+    response_model=CatalogImportResponse,
+    tags=["restaurant-catalog-io"],
+    summary="Importer plats, boissons, composants et recettes depuis un XLSX",
+    description="""
+    Classeur Excel (.xlsx) avec une feuille par type : « Plats », « Boissons », « Composants »,
+    « Recettes » (feuilles absentes ignorées), mêmes colonnes que le CSV. Les composants sont
+    importés avant les plats, puis les recettes : un même fichier peut tout créer.
+
+    Mêmes règles que `/import-csv` (idempotence, import partiel, limite d'une fois par minute).
+    Les erreurs portent en plus le nom de la `sheet`.
+    """,
+    responses={
+        400: {"description": "Fichier inutilisable."},
+        413: {"description": "Fichier de plus de 5 Mo."},
+        429: {"description": "Un import a déjà eu lieu dans la dernière minute."},
+    },
+)
+def import_restaurant_excel(
+    restaurant_id: uuid.UUID,
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.services import catalog_io_service as catalog_io
+
+    content = _read_upload(file)
+    return _run_import(
+        db,
+        restaurant_id,
+        current_user,
+        "xlsx",
+        "classeur",
+        lambda: catalog_io.import_xlsx(db, restaurant_id, content),
+    )
+
+
+@router.get(
+    "/{restaurant_id}/export",
+    dependencies=[Depends(perm.MANAGEMENT)],
+    tags=["restaurant-catalog-io"],
+    summary="Exporter plats, boissons, composants et recettes en XLSX",
+    description="""
+    Télécharge un classeur `.xlsx` (feuilles « Plats », « Boissons », « Composants »,
+    « Recettes ») ré-importable tel quel par `/import-excel`.
+    """,
+    response_class=Response,
+    responses={
+        200: {"description": "Classeur Excel.", "content": {_XLSX_MEDIA_TYPE: {}}}
+    },
+)
+def export_restaurant_catalog(
+    restaurant_id: uuid.UUID,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.services import catalog_io_service as catalog_io
+
+    content = catalog_io.export_xlsx(db, restaurant_id)
+    logger.info("Catalog export restaurant=%s user=%s", restaurant_id, current_user.id)
+    return Response(
+        content=content,
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": f'attachment; filename="catalogue-{restaurant_id}.xlsx"'
+        },
+    )

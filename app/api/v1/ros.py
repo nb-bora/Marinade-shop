@@ -1,5 +1,6 @@
 from fastapi import (
     APIRouter,
+    HTTPException,
     Depends,
     status,
     Query,
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.dependencies import (
     authenticate_websocket,
+    current_tenant_id,
     ensure_tenant_role,
     get_current_user,
     has_tenant_role,
@@ -39,6 +41,7 @@ from app.schemas.ros import (
     ShiftOpenRequest,
     ShiftCloseRequest,
     ShiftResponse,
+    ShiftSummaryResponse,
     SyncBatchRequest,
     SyncBatchResponse,
     ProcurementSuggestionResponse,
@@ -288,6 +291,91 @@ def process_split_payment(
 # -----------------------------------------------------------------------------
 # CASH SHIFT ENDPOINTS
 # -----------------------------------------------------------------------------
+@router.get(
+    "/shifts/current",
+    dependencies=[Depends(perm.CASH_DESK)],
+    response_model=ShiftResponse,
+    summary="Mon shift de caisse ouvert dans le restaurant courant",
+    description="""
+    Retourne le shift OUVERT de l'utilisateur dans le restaurant courant (en-tête
+    `X-Tenant-ID`, ou son restaurant par défaut). 404 s'il n'a pas de shift ouvert.
+    """,
+    responses={404: {"description": "Aucun shift ouvert."}},
+)
+def get_current_shift(
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
+    tenant_id = current_tenant_id(db)
+    if tenant_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-Tenant-ID header is required",
+        )
+    shift = RosService(db).get_current_shift(tenant_id, current_user.id)
+    if shift is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Aucun shift de caisse ouvert"
+        )
+    return shift
+
+
+def _shift_for_user(db: Session, user: User, shift_id: UUID):
+    """Le shift, visible de son opérateur ou du management du restaurant (sinon 404)."""
+    from app.models.ros import RosCashShift
+
+    shift = db.get(RosCashShift, shift_id)
+    if shift is None or (
+        shift.operator_user_id != user.id
+        and not has_tenant_role(db, user, shift.restaurant_id, perm.MANAGEMENT_ROLES)
+    ):
+        raise HTTPException(status_code=404, detail="Shift introuvable")
+    return shift
+
+
+@router.get(
+    "/shifts/{shift_id}/summary",
+    dependencies=[Depends(perm.CASH_DESK)],
+    response_model=ShiftSummaryResponse,
+    summary="Bilan d'un shift : encaissements par moyen de paiement et caisse attendue",
+    description="""
+    Totaux des encaissements réussis de l'opérateur pendant le shift (jusqu'à maintenant s'il
+    est ouvert), par moyen de paiement, et caisse attendue (`fond de caisse + espèces`).
+    Visible de l'opérateur du shift et du management.
+    """,
+)
+def get_shift_summary(
+    shift_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    shift = _shift_for_user(db, current_user, shift_id)
+    return RosService(db).get_shift_summary(shift)
+
+
+@router.post(
+    "/shifts/{shift_id}/summary",
+    dependencies=[Depends(perm.CASH_DESK)],
+    response_model=ShiftSummaryResponse,
+    summary="Clôturer un shift par son identifiant et obtenir son bilan",
+    description="""
+    Ferme le shift `shift_id` avec le montant compté dans le tiroir, puis renvoie le bilan
+    final. L'opérateur ferme le sien ; le management peut fermer celui d'un caissier.
+    409 si le shift est déjà clôturé.
+    """,
+    responses={409: {"description": "Shift déjà clôturé."}},
+)
+def close_shift_with_summary(
+    shift_id: UUID,
+    data: ShiftCloseRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    shift = _shift_for_user(db, current_user, shift_id)
+    service = RosService(db)
+    closed = service.close_shift(shift.restaurant_id, current_user.id, data, shift=shift)
+    return service.get_shift_summary(closed)
+
+
 @router.post(
     "/restaurants/{restaurant_id}/shifts/open",
     dependencies=[Depends(perm.CASH_DESK)],
@@ -374,8 +462,10 @@ async def websocket_kds_endpoint(
     )
     try:
         while True:
-            # Keep connection open and await ping/heartbeat from screen
-            _ = await websocket.receive_text()
+            # Garde la connexion ouverte ; `ping` -> `pong` (battement de cœur de l'écran).
+            # Le format des messages poussés est décrit dans app/utils/ws_manager.py.
+            if (await websocket.receive_text()).strip().lower() == "ping":
+                await websocket.send_text("pong")
     except WebSocketDisconnect:
         kds_manager.disconnect(websocket, rest_str, station_str)
 

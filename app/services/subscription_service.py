@@ -1,5 +1,6 @@
 from typing import Optional, List
 from datetime import date
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 import uuid
 
@@ -70,6 +71,35 @@ class SubscriptionService:
         self, user_id: uuid.UUID, restaurant_id: uuid.UUID | None = None
     ) -> Optional[Subscription]:
         return self.subscription_repo.get_active_subscription(user_id, restaurant_id)
+
+    def get_restaurant_subscription(
+        self, restaurant_id: uuid.UUID
+    ) -> Optional[Subscription]:
+        """Abonnement actif d'un restaurant, quel que soit le compte souscripteur."""
+        return (
+            self.db.query(Subscription)
+            .filter(
+                Subscription.restaurant_id == restaurant_id,
+                Subscription.status == "active",
+            )
+            .order_by(Subscription.created_at.desc(), Subscription.id)
+            .first()
+        )
+
+    def list_subscriptions(
+        self, skip: int, limit: int, status: Optional[str] = None
+    ) -> tuple[List[Subscription], int]:
+        query = self.db.query(Subscription)
+        if status:
+            query = query.filter(Subscription.status == status)
+        total = query.with_entities(func.count(Subscription.id)).scalar() or 0
+        items = (
+            query.order_by(Subscription.created_at.desc(), Subscription.id)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+        return items, total
 
     def update_subscription_status(
         self, subscription_id: uuid.UUID, status: str

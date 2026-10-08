@@ -28,6 +28,9 @@ from app.schemas.reservation import (
     WaitlistResponse,
 )
 from app.utils.enums import ReservationStatus
+from app.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(
     prefix="/reservations",
@@ -171,7 +174,9 @@ def list_reservations(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    query = db.query(Reservation).filter(Reservation.restaurant_id == restaurant_id)
+    query = db.query(Reservation).filter(
+        Reservation.restaurant_id == restaurant_id, Reservation.deleted_at.is_(None)
+    )
     if date_from:
         query = query.filter(Reservation.reservation_date >= date_from)
     if date_to:
@@ -209,7 +214,11 @@ def get_reservation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
+    reservation = (
+        db.query(Reservation)
+        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
+        .first()
+    )
     if reservation is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
@@ -227,7 +236,11 @@ def update_reservation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
+    reservation = (
+        db.query(Reservation)
+        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
+        .first()
+    )
     if reservation is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
@@ -256,16 +269,24 @@ def delete_reservation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
+    reservation = (
+        db.query(Reservation)
+        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
+        .first()
+    )
     if reservation is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
         )
-    db.query(ReservationGuest).filter(
-        ReservationGuest.reservation_id == reservation_id
-    ).delete()
-    db.delete(reservation)
+    # Suppression logique : la ligne et ses invités restent en base (historique,
+    # no-show, statistiques) mais disparaissent de l'API et libèrent la table.
+    reservation.deleted_at = datetime.now(timezone.utc)
+    if reason:
+        reservation.cancel_reason = reason
     db.flush()
+    logger.info(
+        "Reservation soft-deleted: %s by user=%s", reservation_id, current_user.id
+    )
     return None
 
 
@@ -279,7 +300,11 @@ def confirm_reservation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
+    reservation = (
+        db.query(Reservation)
+        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
+        .first()
+    )
     if reservation is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
@@ -304,7 +329,11 @@ def check_in_reservation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
+    reservation = (
+        db.query(Reservation)
+        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
+        .first()
+    )
     if reservation is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
@@ -326,7 +355,11 @@ def cancel_reservation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
+    reservation = (
+        db.query(Reservation)
+        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
+        .first()
+    )
     if reservation is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"

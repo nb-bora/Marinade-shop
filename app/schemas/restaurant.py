@@ -420,3 +420,42 @@ class CommandeResponse(CommandeBase):
     remboursements: List[CommandeRefundResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CatalogImportError(BaseModel):
+    row: int = Field(description="Numéro de ligne dans le fichier (l'en-tête est la ligne 1)")
+    field: str = Field(description="Colonne en cause (vide si la ligne entière est refusée)")
+    message: str
+    sheet: Optional[str] = Field(None, description="Feuille concernée (import XLSX)")
+
+
+class CatalogImportResponse(BaseModel):
+    imported: int = Field(description="Lignes créées ou mises à jour")
+    created: int
+    updated: int
+    errors: List[CatalogImportError]
+
+
+class EasyTransactSettings(BaseModel):
+    """Réglages Easy Transact d'un restaurant : jamais de secret, seulement le NOM des
+    variables d'environnement qui les portent."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    enabled: bool
+    service_code: str
+    webhook_url: Optional[str] = None
+    success_url: Optional[str] = None
+    failure_url: Optional[str] = None
+    provider_account_ref: Optional[str] = None
+    credential_env_key: str
+    webhook_secret_env_key: str
+
+
+class RestaurantConfigResponse(BaseModel):
+    restaurant_id: uuid.UUID
+    currency: str
+    taux_service: Optional[Decimal] = None
+    horaires_ouverture: Optional[dict] = None
+    config: dict = Field(default_factory=dict, description="config_jsonb, secrets retirés")
+    easytransact: Optional[EasyTransactSettings] = None

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime, date
 import uuid
 
@@ -53,6 +53,13 @@ class SubscriptionResponse(SubscriptionBase):
     user_id: uuid.UUID
     created_at: datetime
     updated_at: datetime
+
+
+class SubscriptionListResponse(BaseModel):
+    items: List[SubscriptionResponse]
+    total: int
+    skip: int
+    limit: int
 
 
 class DailyBalanceBase(BaseModel):

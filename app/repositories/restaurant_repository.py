@@ -595,6 +595,23 @@ class CommandeItemRepository(BaseRepository[CommandeItem]):
             .all()
         )
 
+    def get_by_commande_ids(
+        self, commande_ids: List[uuid.UUID]
+    ) -> Dict[uuid.UUID, List[CommandeItem]]:
+        """Lignes de plusieurs commandes en UNE requête, groupées par commande."""
+        grouped: Dict[uuid.UUID, List[CommandeItem]] = {}
+        if not commande_ids:
+            return grouped
+        rows = (
+            self.db.query(CommandeItem)
+            .filter(CommandeItem.commande_id.in_(commande_ids))
+            .order_by(CommandeItem.created_at, CommandeItem.id)
+            .all()
+        )
+        for row in rows:
+            grouped.setdefault(row.commande_id, []).append(row)
+        return grouped
+
     def get_by_plat_id(self, plat_id: uuid.UUID) -> List[CommandeItem]:
         return self.db.query(CommandeItem).filter(CommandeItem.plat_id == plat_id).all()
 
@@ -617,6 +634,23 @@ class CommandeRefundRepository(BaseRepository[CommandeRefund]):
             .order_by(CommandeRefund.created_at.desc())
             .all()
         )
+
+    def get_by_commande_ids(
+        self, commande_ids: List[uuid.UUID]
+    ) -> Dict[uuid.UUID, List[CommandeRefund]]:
+        """Remboursements de plusieurs commandes en UNE requête, groupés par commande."""
+        grouped: Dict[uuid.UUID, List[CommandeRefund]] = {}
+        if not commande_ids:
+            return grouped
+        rows = (
+            self.db.query(CommandeRefund)
+            .filter(CommandeRefund.commande_id.in_(commande_ids))
+            .order_by(CommandeRefund.created_at.desc(), CommandeRefund.id)
+            .all()
+        )
+        for row in rows:
+            grouped.setdefault(row.commande_id, []).append(row)
+        return grouped
 
     def pending_amount(self, commande_id: uuid.UUID) -> Decimal:
         """Somme des demandes en attente d'une commande (une ligne d'agregat)."""

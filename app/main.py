@@ -171,6 +171,8 @@ app.add_middleware(
     allow_credentials=settings.ALLOW_CREDENTIALS,
     allow_methods=settings.cors_methods,
     allow_headers=settings.cors_headers,
+    # Lisibles par le navigateur : total d'une liste paginée, nom du fichier exporté.
+    expose_headers=["X-Total-Count", "Content-Disposition"],
 )
 
 # Include the API router

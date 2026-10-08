@@ -31,13 +31,17 @@ class UserService:
         self.user_repo = UserRepository(db)
 
     def get_user(self, user_id: uuid.UUID) -> Optional[User]:
-        return self.user_repo.get(str(user_id))
+        user = self.user_repo.get(str(user_id))
+        return None if user is None or user.is_deleted else user
 
     def get_user_by_email(self, email: str) -> Optional[User]:
         return self.user_repo.get_by_email(email)
 
     def get_all_users(self, skip: int = 0, limit: int = 100) -> List[User]:
         return self.user_repo.get_all(skip, limit)
+
+    def count_users(self) -> int:
+        return self.user_repo.count_active()
 
     def get_users_by_role(
         self, role: str, skip: int = 0, limit: int = 100
@@ -54,7 +58,7 @@ class UserService:
         return self.user_repo.create(values)
 
     def update_user(self, user_id: uuid.UUID, user_data: UserUpdate) -> Optional[User]:
-        user = self.user_repo.get(str(user_id))
+        user = self.get_user(user_id)
         if not user:
             return None
         values = user_data.model_dump(exclude_unset=True)
@@ -73,4 +77,7 @@ class UserService:
         return self.user_repo.update(user, values)
 
     def delete_user(self, user_id: uuid.UUID) -> bool:
-        return self.user_repo.delete(str(user_id)) is not None
+        deleted = self.user_repo.delete(str(user_id)) is not None
+        if deleted:
+            logger.info("User soft-deleted: %s", user_id)
+        return deleted

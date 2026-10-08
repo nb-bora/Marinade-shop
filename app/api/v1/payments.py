@@ -18,7 +18,7 @@ from app.api.dependencies import (
 )
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.payment import PaymentIntent
+from app.models.payment import PaymentConfiguration, PaymentIntent
 from app.schemas.payment import (
     EasyTransactCheckoutCreate,
     EasyTransactInitiateRequest,
@@ -34,6 +34,36 @@ from app.schemas.payment import (
 from app.services.easy_transact_service import EasyTransactPaymentService
 
 router = APIRouter(prefix="/payments/easytransact", tags=["payments"])
+
+
+@router.get(
+    "/configuration",
+    response_model=PaymentConfigurationResponse,
+    summary="Lire la configuration Easy Transact d'un restaurant (lecture seule)",
+    description="""
+    Retourne la configuration du restaurant désigné par `restaurant_id`. Ne contient aucun
+    secret : `credential_env_key` et `webhook_secret_env_key` sont seulement les NOMS des
+    variables d'environnement qui les portent. Réservé au management du restaurant.
+    """,
+    responses={404: {"description": "Aucune configuration pour ce restaurant."}},
+)
+def get_configuration(
+    restaurant_id: uuid.UUID,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    ensure_tenant_role(db, current_user, restaurant_id, perm.MANAGEMENT_ROLES)
+    config = (
+        db.query(PaymentConfiguration)
+        .filter(
+            PaymentConfiguration.restaurant_id == restaurant_id,
+            PaymentConfiguration.provider == "easytransact",
+        )
+        .first()
+    )
+    if config is None:
+        raise HTTPException(status_code=404, detail="Payment configuration not found")
+    return config
 
 
 @router.put("/configuration", response_model=PaymentConfigurationResponse)

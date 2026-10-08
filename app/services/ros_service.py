@@ -702,12 +702,20 @@ class RosService:
         restaurant_id: uuid.UUID,
         operator_user_id: uuid.UUID,
         data: ShiftCloseRequest,
+        *,
+        shift: Optional[RosCashShift] = None,
     ) -> RosCashShift:
-        shift = self.shift_repo.get_active_shift(restaurant_id, operator_user_id)
-        if not shift:
+        """Ferme le shift ouvert de `operator_user_id`, ou `shift` s'il est fourni
+        (un manager peut ainsi fermer le shift d'un caissier ; `operator_user_id`
+        reste alors l'auteur de l'action dans l'audit)."""
+        if shift is None:
+            shift = self.shift_repo.get_active_shift(restaurant_id, operator_user_id)
+        if not shift or shift.restaurant_id != restaurant_id:
             raise NotFoundError(
                 "Aucun shift de caisse ouvert trouvé pour cet opérateur"
             )
+        if shift.status != CashShiftStatus.OPEN.value:
+            raise ConflictError("Ce shift de caisse est déjà clôturé")
 
         # Especes encaissees PAR CET OPERATEUR depuis l'ouverture de son shift,
         # additionnees par la base. Avant : celles de tous les caissiers du restaurant.
@@ -716,7 +724,7 @@ class RosService:
                 self.db.execute(
                     select(func.coalesce(func.sum(RosPaymentTransaction.amount), 0)).where(
                         RosPaymentTransaction.restaurant_id == restaurant_id,
-                        RosPaymentTransaction.received_by == operator_user_id,
+                        RosPaymentTransaction.received_by == shift.operator_user_id,
                         RosPaymentTransaction.payment_method
                         == RosPaymentMethod.CASH.value,
                         RosPaymentTransaction.created_at >= shift.opened_at,
@@ -756,6 +764,52 @@ class RosService:
         )
 
         return closed_shift
+
+    def get_current_shift(
+        self, restaurant_id: uuid.UUID, operator_user_id: uuid.UUID
+    ) -> Optional[RosCashShift]:
+        return self.shift_repo.get_active_shift(restaurant_id, operator_user_id)
+
+    def get_shift_summary(self, shift: RosCashShift) -> Dict[str, Any]:
+        """Encaissements d'un shift par moyen de paiement, en UNE requête d'agrégat.
+
+        Fenêtre : de l'ouverture à la clôture (ou à maintenant si le shift est ouvert),
+        pour l'opérateur du shift, paiements réussis uniquement.
+        """
+        conditions = [
+            RosPaymentTransaction.restaurant_id == shift.restaurant_id,
+            RosPaymentTransaction.received_by == shift.operator_user_id,
+            RosPaymentTransaction.status == "SUCCEEDED",
+            RosPaymentTransaction.created_at >= shift.opened_at,
+        ]
+        if shift.closed_at is not None:
+            conditions.append(RosPaymentTransaction.created_at <= shift.closed_at)
+        rows = self.db.execute(
+            select(
+                RosPaymentTransaction.payment_method,
+                func.count(RosPaymentTransaction.id),
+                func.coalesce(func.sum(RosPaymentTransaction.amount), 0),
+            )
+            .where(*conditions)
+            .group_by(RosPaymentTransaction.payment_method)
+        ).all()
+        by_method = {
+            method: {"count": count, "total": Decimal(str(total))}
+            for method, count, total in rows
+        }
+        cash_sales = by_method.get(RosPaymentMethod.CASH.value, {}).get(
+            "total", Decimal("0")
+        )
+        return {
+            "shift": shift,
+            "payments_by_method": by_method,
+            "payments_count": sum(v["count"] for v in by_method.values()),
+            "payments_total": sum(
+                (v["total"] for v in by_method.values()), Decimal("0")
+            ),
+            "cash_sales": cash_sales,
+            "expected_closing_balance": shift.opening_balance + cash_sales,
+        }
 
     # -------------------------------------------------------------------------
     # OFFLINE SYNC BATCH REPLAY

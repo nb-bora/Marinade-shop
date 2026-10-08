@@ -174,7 +174,7 @@ Le fichier `.env` est ignoré par git. Toutes les variables sont décrites dans 
 
 ```powershell
 python -m alembic upgrade head
-python -m alembic current      # doit afficher 20260928_1200 (head)
+python -m alembic current      # doit afficher 20261008_0900 (head)
 ```
 
 Alembic utilise `MIGRATION_DATABASE_URL` si elle est définie, sinon la connexion de l'application.
@@ -768,6 +768,11 @@ Toutes les routes sont préfixées par `/v1`. Toute route de liste accepte `?ski
 | PUT | `/ros/restaurants/{id}/tickets/{ticket_id}/status` | chef, sous-chef, barman, serveur, hôte |
 | POST | `/ros/restaurants/{id}/payments`, `.../payments/split` | caissier |
 | POST | `/ros/restaurants/{id}/shifts/open`, `.../shifts/close` | caissier |
+| GET | `/ros/shifts/current`, `/ros/shifts/{id}/summary` ; POST `/ros/shifts/{id}/summary` (clôture) | caissier (son shift) ou manager |
+| GET | `/restaurants/{id}/config`, `/restaurants/{id}/export` ; POST `.../import-csv`, `.../import-excel` (1 import/min) | manager |
+| GET | `/subscriptions` (admin, `{items,total,skip,limit}`), `/payments/easytransact/configuration?restaurant_id=` | admin / manager |
+| GET/POST | `/restaurants/{id}/commandes/{cid}[/items\|/refunds[/{rid}/approve\|reject]]` | selon le rôle |
+| WS | `/ros/ws/kds/{id}/{station}` : événements `ticket.created` / `ticket.updated` (format dans `app/utils/ws_manager.py`) | production |
 | POST | `/ros/restaurants/{id}/sync` | serveur, caissier, hôte, barman (caissier si paiements) |
 | GET | `/ros/restaurants/{id}/procurement/suggestions` | chef, sous-chef |
 | GET | `/ros/group/reporting` | membre (restaurants dont on est propriétaire) |
@@ -825,6 +830,7 @@ Relire toute migration générée avant de l'appliquer. Les migrations s'exécut
 | `20260928_1000` | Préfixe de référence unique par restaurant, frais et date de fin des paiements, index d'historique |
 | `20260928_1100` | Politiques RLS évaluées une fois par requête (InitPlan) |
 | `20260928_1200` | Lecture seule de `restaurants` pour les membres de l'équipe |
+| `20261008_0900` | `reservations.deleted_at` : suppression logique des réservations |
 
 ## Tests
 

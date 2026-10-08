@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from app.core.database import get_db
 from app.utils.enums import SubscriptionStatus
 from app.services.subscription_service import SubscriptionService
@@ -14,13 +14,17 @@ from app.schemas.subscription import (
     DailyBalanceResponse,
     DailyBalanceCreate,
     DailyBalanceUpdate,
+    SubscriptionListResponse,
 )
 from app.api.dependencies import (
+    current_tenant_id,
     get_current_user,
     require_admin,
     require_subscription_access,
 )
 import uuid
+
+from app.api.pagination import Page, page_params
 
 router = APIRouter(prefix="/subscriptions")
 
@@ -158,12 +162,50 @@ def get_my_subscription(
     current_user=Depends(get_current_user), db: Session = Depends(get_db)
 ):
     subscription_service = SubscriptionService(db)
-    subscription = subscription_service.get_user_subscription(current_user.id)
+    # L'abonnement est celui du RESTAURANT courant (X-Tenant-ID ou restaurant par
+    # défaut du compte), quel que soit le compte qui l'a souscrit : un manager ou un
+    # caissier voit l'abonnement du restaurant où il travaille. Sans restaurant de
+    # contexte (admin plateforme sans en-tête), on retombe sur les siens.
+    tenant_id = current_tenant_id(db)
+    if tenant_id is not None:
+        subscription = subscription_service.get_restaurant_subscription(tenant_id)
+    else:
+        subscription = subscription_service.get_user_subscription(current_user.id)
     if not subscription:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="No active subscription found"
         )
     return subscription
+
+
+@router.get(
+    "",
+    response_model=SubscriptionListResponse,
+    tags=["subscriptions"],
+    summary="Lister tous les abonnements (admin)",
+    description="""
+    Liste paginée (`skip`, `limit`) de tous les abonnements de la plateforme, du plus récent au plus ancien.
+
+    `total` est le nombre d'abonnements correspondant au filtre, indépendamment de la page.
+    Filtre optionnel : `status`.
+    """,
+    responses={
+        401: {"description": "Token absent ou invalide."},
+        403: {"description": "Réservé aux administrateurs."},
+    },
+)
+def list_subscriptions(
+    status_filter: Optional[SubscriptionStatus] = Query(None, alias="status"),
+    page: Page = Depends(page_params),
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    items, total = SubscriptionService(db).list_subscriptions(
+        page.skip, page.limit, status_filter.value if status_filter else None
+    )
+    return SubscriptionListResponse(
+        items=items, total=total, skip=page.skip, limit=page.limit
+    )
 
 
 @router.get(
@@ -296,18 +338,19 @@ def get_subscription_balances(
 @router.get(
     "/{subscription_id}/balances/current",
     dependencies=[Depends(require_subscription_access)],
-    response_model=DailyBalanceResponse,
+    response_model=Optional[DailyBalanceResponse],
     tags=["subscription-balances"],
     summary="Solde quotidien courant",
     description="""
-    Retourne le solde du jour en cours pour un abonnement donné.
+    Retourne le solde du jour en cours pour un abonnement donné, ou `null` (200) si aucun
+    solde n'a encore été créé aujourd'hui : l'absence de solde n'est pas une erreur.
 
     Cette information est essentielle pour connaître la consommation restante et décider d’une autorisation de transaction.
     """,
     responses={
-        200: {"description": "Solde courant récupéré."},
+        200: {"description": "Solde courant récupéré, ou null s'il n'existe pas encore."},
         401: {"description": "Token absent ou invalide."},
-        404: {"description": "Aucun solde courant trouvé."},
+        404: {"description": "Abonnement introuvable."},
     },
 )
 def get_current_balance(
@@ -316,12 +359,7 @@ def get_current_balance(
     db: Session = Depends(get_db),
 ):
     subscription_service = SubscriptionService(db)
-    balance = subscription_service.get_current_balance(subscription_id)
-    if not balance:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="No current balance found"
-        )
-    return balance
+    return subscription_service.get_current_balance(subscription_id)
 
 
 @router.post(

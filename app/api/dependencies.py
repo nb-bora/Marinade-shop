@@ -36,7 +36,7 @@ from app.models.restaurant import (
     Restaurant,
     Table,
 )
-from app.models.ros import ProductionTicket, ServiceSession
+from app.models.ros import ProductionTicket, RosCashShift, ServiceSession
 from app.models.subscription import Subscription
 from app.models.transaction import Transaction
 from app.models.user import User
@@ -359,6 +359,7 @@ _RESOURCE_MODELS = {
     "waitlist_id": WaitlistEntry,
     "ticket_id": ProductionTicket,
     "session_id": ServiceSession,
+    "shift_id": RosCashShift,
 }
 
 

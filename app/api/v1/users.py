@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.core.database import get_db
@@ -19,6 +19,9 @@ router = APIRouter(prefix="/users", tags=["users"])
     Retourne la liste paginée des comptes utilisateurs du système.
 
     Cette route est réservée aux administrateurs. Elle permet de filtrer les résultats via `skip` et `limit`.
+
+    Le corps reste un tableau (les clients existants ne changent pas) ; le nombre total de comptes
+    non supprimés est dans l'en-tête `X-Total-Count`.
     """,
     responses={
         200: {"description": "Liste des utilisateurs récupérée avec succès."},
@@ -27,12 +30,14 @@ router = APIRouter(prefix="/users", tags=["users"])
     },
 )
 def get_users(
-    skip: int = 0,
-    limit: int = 100,
+    response: Response,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     user_service = UserService(db)
+    response.headers["X-Total-Count"] = str(user_service.count_users())
     return user_service.get_all_users(skip, limit)
 
 
@@ -177,9 +182,9 @@ def update_user(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Supprimer un utilisateur",
     description="""
-    Supprime définitivement un utilisateur du système.
+    Supprime logiquement un utilisateur (`is_deleted`, compte désactivé, masqué des listes).
 
-    Cette action est irréversible et ne doit être utilisée que dans le cadre d’une gestion administrative stricte.
+    Les données liées sont conservées pour l'historique et l'audit.
     """,
     responses={
         204: {"description": "Utilisateur supprimé avec succès."},

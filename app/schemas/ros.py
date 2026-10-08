@@ -221,6 +221,22 @@ class ShiftResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PaymentMethodTotal(BaseModel):
+    count: int
+    total: Decimal
+
+
+class ShiftSummaryResponse(BaseModel):
+    shift: ShiftResponse
+    payments_by_method: Dict[str, PaymentMethodTotal]
+    payments_count: int
+    payments_total: Decimal
+    cash_sales: Decimal = Field(description="Espèces encaissées pendant le shift")
+    expected_closing_balance: Decimal = Field(
+        description="Fond de caisse + espèces encaissées : ce que le tiroir devrait contenir"
+    )
+
+
 # AUDIT SCHEMAS
 class AuditLogResponse(BaseModel):
     id: UUID

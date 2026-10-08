@@ -68,6 +68,8 @@ class Reservation(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     cancel_reason = Column(Text, nullable=True)
+    # Suppression logique (DELETE) : masquée de l'API, conservée pour l'historique.
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(
