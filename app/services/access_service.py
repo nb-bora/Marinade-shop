@@ -14,7 +14,7 @@ from app.schemas.user import RestaurantAccess
 # l'utilisateur (propriétaire ou membre actif) ; un administrateur voit tout.
 _ACCESS_LIST_SQL = text(
     """
-    SELECT r.id, r.name, r.city, r.currency,
+    SELECT r.id, r.name, r.city, r.currency, r.type_etablissement,
            (r.user_id = CAST(:user AS uuid)) AS is_owner,
            (m.id IS NOT NULL) AS is_member,
            m.role AS role, m.staff_role AS staff_role
@@ -83,6 +83,7 @@ class AccessService:
                 RestaurantAccess(
                     restaurant_id=row.id,
                     name=row.name,
+                    type_etablissement=row.type_etablissement,
                     city=row.city,
                     currency=row.currency,
                     relation=relation,

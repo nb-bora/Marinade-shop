@@ -1,12 +1,19 @@
 from pydantic import BaseModel, Field, ConfigDict, field_validator
-from typing import Optional, List
+from typing import List, Literal, Optional
 from datetime import datetime
 from decimal import Decimal
 import uuid
 
 
+TypeEtablissement = Literal["restaurant", "pressing"]
+
+
 class RestaurantBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
+    type_etablissement: TypeEtablissement = Field(
+        "restaurant",
+        description="Type d'établissement, choisi à la création et jamais modifié ensuite.",
+    )
     description: Optional[str] = None
     logo_url: Optional[str] = None
     currency: str = Field(default="XAF", max_length=3)
@@ -26,6 +33,10 @@ class RestaurantCreate(RestaurantBase):
 
 class RestaurantUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
+    type_etablissement: Optional[TypeEtablissement] = Field(
+        None,
+        description="Lecture seule après la création : toute valeur différente est refusée (409).",
+    )
     description: Optional[str] = None
     logo_url: Optional[str] = None
     currency: Optional[str] = Field(None, max_length=3)

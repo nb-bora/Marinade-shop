@@ -26,6 +26,21 @@ from app.models.restaurant import (
     CommandeItem,
     CommandeRefund,
 )
+from app.models.pressing import (
+    PressingTarif,
+    PressingArticle,
+    PressingCombinaison,
+    PressingCombinaisonLigne,
+    PressingZone,
+    PressingMachine,
+    PressingMachineEvenement,
+    PressingMaintenance,
+    PressingCommande,
+    PressingCommandeLigne,
+    PressingCommandeMachine,
+    PressingPaiement,
+    PressingCloture,
+)
 from app.models.ros import (
     RosCustomer,
     ServiceSession,
@@ -79,4 +94,12 @@ __all__ = [
     "Reservation",
     "ReservationGuest",
     "WaitlistEntry",
+    "PressingTarif",
+    "PressingArticle",
+    "PressingCombinaison",
+    "PressingCombinaisonLigne",
+    "PressingZone",
+    "PressingMachine",
+    "PressingMachineEvenement",
+    "PressingMaintenance",
 ]

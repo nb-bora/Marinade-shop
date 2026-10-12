@@ -27,6 +27,10 @@ class Restaurant(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     name = Column(String(255), nullable=False)
+    # 'restaurant' | 'pressing' : fixé à la création, jamais modifié ensuite.
+    type_etablissement = Column(
+        String(20), nullable=False, default="restaurant", server_default="restaurant"
+    )
     description = Column(Text, nullable=True)
     logo_url = Column(String(500), nullable=True)
     currency = Column(String(3), default="XAF", nullable=False)

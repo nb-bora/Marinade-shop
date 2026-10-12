@@ -557,6 +557,56 @@ def import_xlsx(db: Session, restaurant_id: uuid.UUID, content: bytes) -> Import
 
 
 # --------------------------------------------------------------------------- #
+# Modèles vierges
+# --------------------------------------------------------------------------- #
+# Une entrée par type : feuilles (nom -> en-têtes) du classeur à remplir. Les en-têtes sont
+# ceux que lit l'interface web (import en masse) ; ceux de « Plats », « Boissons » et
+# « Recettes » sont aussi acceptés tels quels par `/import-excel` (colonnes en plus ignorées).
+TEMPLATE_TYPES: Dict[str, Dict[str, List[str]]] = {
+    "menus": {
+        "Menus": ["nom", "description", "actif"],
+        "Catégories": ["menu", "nom", "ordre"],
+    },
+    "plats": {
+        "Plats": ["nom", "prix", "description", "code", "disponible", "temps_preparation", "categorie"],
+    },
+    "boissons": {
+        "Boissons": ["nom", "prix", "description", "code", "disponible", "alcool", "categorie"],
+    },
+    "composants": {
+        "Composants": ["nom", "type", "unite", "prix_supplement", "stock", "disponible", "description"],
+    },
+    "recettes": {"Recettes": ["plat", "composant", "quantite", "unite"]},
+    "tables": {"Tables": ["numero", "capacite", "emplacement", "forme"]},
+}  # fmt: skip
+
+
+def template_xlsx(import_type: str) -> bytes:
+    """Classeur vierge d'un type d'import : une feuille par jeu de colonnes, en-têtes seulement."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+
+    sheets = TEMPLATE_TYPES.get(import_type)
+    if sheets is None:
+        raise FileFormatError("type de modèle inconnu : " + ", ".join(sorted(TEMPLATE_TYPES)))
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="EA6A2B")
+    for name, header in sheets.items():
+        sheet = workbook.create_sheet(name)
+        sheet.append(header)
+        for index, cell in enumerate(sheet[1], start=1):
+            cell.font = header_font
+            cell.fill = header_fill
+            sheet.column_dimensions[cell.column_letter].width = max(14, len(header[index - 1]) + 6)
+        sheet.freeze_panes = "A2"
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+# --------------------------------------------------------------------------- #
 # Export
 # --------------------------------------------------------------------------- #
 def _safe_cell(value: Any) -> Any:

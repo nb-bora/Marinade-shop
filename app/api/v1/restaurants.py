@@ -201,6 +201,9 @@ def get_restaurant(restaurant_id: uuid.UUID, db: Session = Depends(get_db)):
         401: {"description": "Token JWT absent ou invalide."},
         403: {"description": "Accès interdit."},
         404: {"description": "Restaurant introuvable."},
+        409: {
+            "description": "Changement de `type_etablissement` refusé : le type se fixe à la création."
+        },
     },
 )
 def update_restaurant(
@@ -221,6 +224,17 @@ def update_restaurant(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized"
         )
+
+    # Le type d'établissement se lit mais ne se change pas : le renvoyer tel quel est toléré.
+    if (
+        restaurant_data.type_etablissement is not None
+        and restaurant_data.type_etablissement != restaurant.type_etablissement
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Le type d'établissement ne se change pas après la création",
+        )
+    restaurant_data.__pydantic_fields_set__.discard("type_etablissement")
 
     try:
         updated_restaurant = restaurant_service.update_restaurant(
@@ -1771,7 +1785,12 @@ def get_restaurant_config(restaurant_id: uuid.UUID, db: Session = Depends(get_db
     )
 
 
-def _enforce_import_rate_limit(db: Session, restaurant_id: uuid.UUID) -> None:
+def _enforce_import_rate_limit(
+    db: Session,
+    restaurant_id: uuid.UUID,
+    action: str = _IMPORT_ACTION,
+    lock_prefix: str = "catalog_import",
+) -> None:
     """Un import par minute et par restaurant, partagé entre tous les workers.
 
     Le dernier import est lu dans le journal d'audit (donc en base, pas en mémoire de
@@ -1781,7 +1800,7 @@ def _enforce_import_rate_limit(db: Session, restaurant_id: uuid.UUID) -> None:
 
     db.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-        {"key": f"catalog_import:{restaurant_id}"},
+        {"key": f"{lock_prefix}:{restaurant_id}"},
     )
     remaining = db.execute(
         text(
@@ -1791,7 +1810,7 @@ def _enforce_import_rate_limit(db: Session, restaurant_id: uuid.UUID) -> None:
         ),
         {
             "rid": restaurant_id,
-            "action": _IMPORT_ACTION,
+            "action": action,
             "interval": _IMPORT_INTERVAL_SECONDS,
         },
     ).scalar()
@@ -1969,5 +1988,40 @@ def export_restaurant_catalog(
         media_type=_XLSX_MEDIA_TYPE,
         headers={
             "Content-Disposition": f'attachment; filename="catalogue-{restaurant_id}.xlsx"'
+        },
+    )
+
+
+@router.get(
+    "/{restaurant_id}/export-template",
+    dependencies=[Depends(perm.MANAGEMENT)],
+    tags=["restaurant-catalog-io"],
+    summary="Télécharger un modèle Excel vierge pour un import en masse",
+    description="""
+    Renvoie un classeur `.xlsx` vide (en-têtes de colonnes seulement) pour le `type` demandé :
+    `menus` (feuilles « Menus » et « Catégories »), `plats`, `boissons`, `composants`,
+    `recettes` ou `tables`. Remplissez-le à partir de la deuxième ligne, puis importez-le.
+    """,
+    response_class=Response,
+    responses={
+        200: {"description": "Classeur Excel vierge.", "content": {_XLSX_MEDIA_TYPE: {}}},
+        400: {"description": "Type de modèle inconnu."},
+    },
+)
+def export_import_template(
+    restaurant_id: uuid.UUID,
+    import_type: str = Query(..., alias="type"),
+):
+    from app.services import catalog_io_service as catalog_io
+
+    try:
+        content = catalog_io.template_xlsx(import_type.strip().lower())
+    except catalog_io.FileFormatError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return Response(
+        content=content,
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": f'attachment; filename="modele-import-{import_type.strip().lower()}.xlsx"'
         },
     )

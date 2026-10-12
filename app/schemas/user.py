@@ -153,6 +153,7 @@ class RestaurantAccess(BaseModel):
 
     restaurant_id: uuid.UUID
     name: str
+    type_etablissement: Literal["restaurant", "pressing"] = "restaurant"
     city: Optional[str] = None
     currency: str
     relation: Literal["owner", "member", "platform_admin"]
