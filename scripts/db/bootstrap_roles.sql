@@ -14,16 +14,25 @@
 -- Rôles
 SELECT format('CREATE ROLE marinade_owner LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS', :'owner_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'marinade_owner') \gexec
-SELECT format('ALTER ROLE marinade_owner LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS', :'owner_password') \gexec
+-- Ne change que le mot de passe : un administrateur non superutilisateur (Render) ne peut pas
+-- modifier les attributs SUPERUSER / BYPASSRLS d'un rôle existant, et n'en a pas besoin.
+SELECT format('ALTER ROLE marinade_owner PASSWORD %L', :'owner_password') \gexec
 
 SELECT format('CREATE ROLE marinade_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS', :'app_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'marinade_app') \gexec
-SELECT format('ALTER ROLE marinade_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS', :'app_password') \gexec
+SELECT format('ALTER ROLE marinade_app PASSWORD %L', :'app_password') \gexec
 
--- Propriété de la base : le propriétaire applicatif exécute les migrations
+-- Propriété de la base : le propriétaire applicatif exécute les migrations.
+-- Pour céder la propriété, l'administrateur doit pouvoir agir AU NOM de marinade_owner.
+-- Il l'a créé, donc il peut se donner ce rôle (sans superutilisateur).
+GRANT marinade_owner TO CURRENT_USER;
 SELECT format('ALTER DATABASE %I OWNER TO marinade_owner', current_database()) \gexec
 SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database()) \gexec
 SELECT format('GRANT CONNECT ON DATABASE %I TO marinade_app', current_database()) \gexec
+
+-- Le schéma public doit appartenir au propriétaire des migrations (sur Render, il est créé
+-- au nom de l'administrateur : sans cela marinade_owner ne peut pas créer les tables).
+ALTER SCHEMA public OWNER TO marinade_owner;
 
 -- Droits du rôle applicatif sur le schéma public, y compris pour les tables créées plus tard
 GRANT USAGE ON SCHEMA public TO marinade_app;
