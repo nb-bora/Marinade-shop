@@ -15,6 +15,10 @@ MESSAGES = {
     # Authentification
     "auth.authentication_failed": "Authentification échouée.",
     "auth.forbidden": "Accès refusé.",
+    "auth.activation_required": "Votre compte n'est pas encore activé. Saisissez le code reçu par email.",
+    "auth.activation_code_invalid": "Code d'activation incorrect.",
+    "auth.activation_code_expired": "Ce code a expiré. Demandez-en un nouveau.",
+    "auth.activation_too_many_attempts": "Trop d'essais incorrects. Demandez un nouveau code.",
     # HTTP
     "http.bad_request": "Requête invalide.",
     "http.unauthorized": "Authentification requise.",

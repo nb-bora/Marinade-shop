@@ -88,6 +88,8 @@ def _make_user():
         last_name="Test",
         role="restaurant",
         is_active=True,
+        # Compte activé : sans cela la connexion exigerait d'abord le code d'activation.
+        email_verified_at=datetime.now(timezone.utc),
         password_hash="unused",
     )
 
@@ -278,6 +280,7 @@ def test_production_refuses_to_boot_with_token_exposure_enabled():
             ALLOW_ORIGINS="https://app.example.com",
             SKIP_DB_INIT=True,
             DB_PASSWORD="a-long-unique-db-password-2026",
+            RATE_LIMIT_ENABLED=True,  # la configuration de test le coupe : la production l'exige
             EASYTRANSACT_API_BASE_URL="https://api.example.com",
             EASYTRANSACT_API_TOKEN="t",
             EASYTRANSACT_WEBHOOK_SECRET="s",

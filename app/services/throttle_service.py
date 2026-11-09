@@ -46,6 +46,12 @@ RULES: dict[str, Rule] = {
     "login:ip": Rule(30, 300),
     "login:id": Rule(10, 300),
     "register:ip": Rule(10, 3600),
+    # Activation par code : le compteur d'essais du code borne déjà les devinettes ; ces règles
+    # empêchent d'enchaîner les demandes de codes ou de saturer la boîte d'un tiers.
+    "activate:ip": Rule(20, 900),
+    "activate:id": Rule(10, 900),
+    "resend_activation:ip": Rule(10, 3600),
+    "resend_activation:id": Rule(5, 3600),
     "forgot:ip": Rule(10, 3600),
     "forgot:id": Rule(3, 3600),
     "reset:ip": Rule(10, 900),

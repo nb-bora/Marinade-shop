@@ -21,6 +21,9 @@ from app.main import app
 # (méthode, chemin) volontairement accessibles sans jeton d'accès.
 PUBLIC_ROUTES = {
     ("POST", "/v1/auth/register"),
+    # Portent leur propre preuve : le code à usage unique reçu par email.
+    ("POST", "/v1/auth/activate"),
+    ("POST", "/v1/auth/resend-activation"),
     ("POST", "/v1/auth/login"),
     ("POST", "/v1/auth/refresh"),
     ("POST", "/v1/auth/forgot-password"),

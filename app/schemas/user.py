@@ -95,6 +95,43 @@ class UserResponse(BaseModel):
     updated_at: datetime
 
 
+class RegistrationResponse(UserResponse):
+    """Compte créé (ou compte en attente d'activation retrouvé) : il reste à saisir le code."""
+
+    activation_required: bool = True
+    # Durée de validité du code en cours, en secondes.
+    activation_expires_in_seconds: int
+    # Délai avant de pouvoir demander un nouvel envoi, en secondes.
+    resend_available_in_seconds: int
+    # Uniquement avec DEV_EXPOSE_AUTH_TOKENS (jamais en production) : le code envoyé par email.
+    activation_code: Optional[str] = None
+
+
+class ActivateAccountRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    code: str = Field(..., min_length=4, max_length=12)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("code")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        # Tolère les espaces et tirets qu'ajoutent certains copier-coller (« 482 913 »).
+        return re.sub(r"[\s-]", "", value)
+
+
+class ResendActivationRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return value.strip().lower()
+
+
 class UserLogin(BaseModel):
     email: str = Field(..., min_length=3, max_length=254)
     password: str = Field(..., min_length=1, max_length=128)

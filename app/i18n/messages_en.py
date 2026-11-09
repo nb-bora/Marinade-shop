@@ -15,6 +15,10 @@ MESSAGES = {
     # Authentication
     "auth.authentication_failed": "Authentication failed.",
     "auth.forbidden": "Access denied.",
+    "auth.activation_required": "Your account is not activated yet. Enter the code sent by email.",
+    "auth.activation_code_invalid": "Incorrect activation code.",
+    "auth.activation_code_expired": "This code has expired. Request a new one.",
+    "auth.activation_too_many_attempts": "Too many incorrect attempts. Request a new code.",
     # HTTP
     "http.bad_request": "Invalid request.",
     "http.unauthorized": "Authentication required.",

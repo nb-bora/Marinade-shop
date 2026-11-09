@@ -1,4 +1,12 @@
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, String, ForeignKey
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+)
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
 import uuid
@@ -22,6 +30,13 @@ class User(Base):
     email_verification_token_hash = Column(String(256), nullable=True)
     phone_verification_code_hash = Column(String(256), nullable=True)
     verification_token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    # Code d'activation du compte (envoyé par email) : empreinte HMAC, jamais le code en clair.
+    activation_code_hash = Column(String(128), nullable=True)
+    activation_code_expires_at = Column(DateTime(timezone=True), nullable=True)
+    activation_code_sent_at = Column(DateTime(timezone=True), nullable=True)
+    activation_code_attempts = Column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     password_reset_token_hash = Column(String(256), nullable=True)
     password_reset_expires_at = Column(DateTime(timezone=True), nullable=True)
     # Malgré son nom historique, cette colonne contient le secret TOTP chiffré

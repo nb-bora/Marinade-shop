@@ -38,6 +38,9 @@ TEST_ENV = {
     "DEBUG": "false",
     "ENVIRONMENT": "test",
     "EMAIL_BACKEND": "memory",
+    # Les compteurs de débit vivent en base : sans base (tests unitaires) ils échoueraient, et
+    # les tests d'intégration inscrivent bien plus de comptes qu'un humain depuis une même IP.
+    "RATE_LIMIT_ENABLED": "false",
     "ALLOW_ORIGINS": "http://localhost:8000",
     "ALLOW_METHODS": "GET,POST,PUT,PATCH,DELETE",
     "ALLOW_HEADERS": "Content-Type,Authorization,X-Tenant-ID,X-Signature",

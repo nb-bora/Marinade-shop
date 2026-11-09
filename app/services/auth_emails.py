@@ -25,6 +25,18 @@ def send_welcome(user: Any) -> None:
     _send("welcome", user)
 
 
+def send_activation_code(db: Any, user: Any, code: str) -> None:
+    """Code d'activation du compte. Envoyé APRÈS le commit : si l'inscription est annulée, aucun
+    email ne part ; le code n'est jamais envoyé pour un compte qui n'existe pas."""
+    email_templates.send_after_commit(
+        db,
+        "activation_code",
+        user.email,
+        {"first_name": user.first_name, "code": code, "email": user.email},
+        _lang(user),
+    )
+
+
 def send_verification(user: Any, token: str) -> None:
     _send("verify_email", user, token=token)
 

@@ -1,11 +1,24 @@
 """Aides partagées par les tests d'intégration PostgreSQL (voir conftest.py)."""
 
+import re
 import uuid
 from contextlib import contextmanager
 
 from sqlalchemy import event, text
 
 PASSWORD = "MotDePasseFort123!"
+
+
+def activation_code_for(email):
+    """Le dernier code d'activation « envoyé » à cette adresse (boîte mémoire des tests)."""
+    from app.services import email_service
+
+    for mail in reversed(email_service.OUTBOX):
+        if mail.to == email:
+            found = re.search(r"Code : (\d{6})", mail.text)
+            if found:
+                return found.group(1)
+    raise AssertionError(f"aucun code d'activation envoyé à {email}")
 
 ITEMS = [
     {
@@ -46,6 +59,11 @@ def register(client, tag):
         },
     )
     assert response.status_code == 201, response.text
+    # Comme un vrai utilisateur : le compte n'est utilisable qu'après saisie du code reçu.
+    activation = client.post(
+        "/v1/auth/activate", json={"email": email, "code": activation_code_for(email)}
+    )
+    assert activation.status_code == 200, activation.text
     return {"email": email, "id": response.json()["id"]}
 
 

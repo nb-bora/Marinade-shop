@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     RESET_TOKEN_EXPIRE_MINUTES: int = 15
     VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
 
+    # --- Activation du compte par code à usage unique (envoyé par email à l'inscription) ---
+    ACTIVATION_CODE_LENGTH: int = 6
+    ACTIVATION_CODE_EXPIRE_MINUTES: int = 15
+    # Essais incorrects tolérés avant d'invalider le code (il faut alors en demander un nouveau).
+    ACTIVATION_CODE_MAX_ATTEMPTS: int = 5
+    # Délai minimal entre deux envois pour un même compte.
+    ACTIVATION_CODE_RESEND_SECONDS: int = 60
+
     # --- Emails (voir app/services/email_service.py) ---
     # auto | smtp | console | memory | disabled. « auto » : SMTP dès que les identifiants
     # sont renseignés, sinon simple journalisation (aucun email ne part).

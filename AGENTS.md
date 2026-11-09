@@ -141,8 +141,10 @@ pytest tests/test_main.py::test_email_validation
 ## Points d'Accès API
 
 ### Authentification
-- `POST /v1/auth/register` - Inscription
-- `POST /v1/auth/login` - Connexion
+- `POST /v1/auth/register` - Inscription : crée un compte **non activé** et envoie par email un code à 6 chiffres (valable 15 min). Si l'email correspond à un compte jamais activé, rien n'est créé : le compte en attente est mis à jour, le code est renvoyé, réponse **200** au lieu de 201. Email déjà activé : 409.
+- `POST /v1/auth/activate` - Active le compte avec le code (`email`, `code`) et ouvre la session (jetons). Erreurs : `auth.activation_code_invalid` (avec `details.attempts_left`), `auth.activation_code_expired`, `auth.activation_too_many_attempts`.
+- `POST /v1/auth/resend-activation` - Renvoie un code (réponse identique que le compte existe ou non ; 1 envoi par minute et par compte)
+- `POST /v1/auth/login` - Connexion. Un compte non activé reçoit 401 `auth.activation_required` (`details.activation_required`) et un nouveau code par email ; les comptes antérieurs à la migration `20261112_0900` sont considérés comme activés.
 - `POST /v1/auth/refresh` - Rafraîchir token
 - `POST /v1/auth/logout` - Déconnexion
 

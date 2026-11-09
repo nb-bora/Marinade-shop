@@ -114,6 +114,39 @@ def welcome(data: Dict[str, Any], lang: str = "fr") -> Mail:
     )
 
 
+def activation_code(data: Dict[str, Any], lang: str = "fr") -> Mail:
+    """Code à usage unique pour activer un compte tout juste créé."""
+    fr = lang == "fr"
+    minutes = settings.ACTIVATION_CODE_EXPIRE_MINUTES
+    email = str(data.get("email") or "")
+    return _mail(
+        "Votre code d'activation Marinade" if fr else "Your Marinade activation code",
+        lang,
+        status=Status("Action requise" if fr else "Action required", "warning"),
+        greeting=_hello(lang, _nom(data)),
+        paragraphs=[
+            "Merci de vous être inscrit sur Marinade. Saisissez le code ci-dessous pour "
+            "activer votre compte."
+            if fr
+            else "Thanks for signing up to Marinade. Enter the code below to activate your "
+            "account."
+        ],
+        code=str(data["code"]),
+        action_label="Saisir mon code" if fr else "Enter my code",
+        action_url=_link("/activate-account", email=email) if email else None,
+        note=(
+            f"Ce code est valable {minutes} minutes et ne peut être utilisé qu'une fois. "
+            "Ne le communiquez à personne : l'équipe Marinade ne vous le demandera jamais. "
+            "Si vous n'êtes pas à l'origine de cette inscription, ignorez simplement cet email."
+            if fr
+            else f"This code is valid for {minutes} minutes and can be used once. Do not share "
+            "it with anyone: the Marinade team will never ask for it. If you did not sign up, "
+            "simply ignore this email."
+        ),
+        signature=_sign(lang),
+    )
+
+
 def verify_email(data: Dict[str, Any], lang: str = "fr") -> Mail:
     fr = lang == "fr"
     hours = settings.VERIFICATION_TOKEN_EXPIRE_HOURS
@@ -408,6 +441,7 @@ def delivery_test(data: Dict[str, Any], lang: str = "fr") -> Mail:
 
 BUILDERS: Dict[str, Callable[[Dict[str, Any], str], Mail]] = {
     "welcome": welcome,
+    "activation_code": activation_code,
     "verify_email": verify_email,
     "password_reset": password_reset,
     "password_changed": password_changed,
@@ -420,6 +454,7 @@ BUILDERS: Dict[str, Callable[[Dict[str, Any], str], Mail]] = {
 
 SAMPLES: Dict[str, Dict[str, Any]] = {
     "welcome": {"first_name": "Brice"},
+    "activation_code": {"first_name": "Brice", "code": "482913", "email": "brice@example.com"},
     "verify_email": {"first_name": "Brice", "token": "exemple-de-jeton"},
     "password_reset": {"first_name": "Brice", "token": "exemple-de-jeton"},
     "password_changed": {"first_name": "Brice"},

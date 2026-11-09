@@ -1,6 +1,6 @@
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -9,6 +9,9 @@ from app.core.database import get_db
 from app.models.user import User
 from app.schemas.transaction import TokenResponse
 from app.schemas.user import (
+    ActivateAccountRequest,
+    RegistrationResponse,
+    ResendActivationRequest,
     UserCreate,
     UserLogin,
     UserResponse,
@@ -21,6 +24,7 @@ from app.schemas.user import (
     TwoFactorVerifyRequest,
     TwoFactorRecoveryCodesResponse,
 )
+from app.services import throttle_service
 from app.services.auth_service import AuthService
 from app.utils.exceptions import AuthenticationError, ValidationError
 
@@ -40,12 +44,74 @@ def _dev_only(**secrets_by_name: str) -> Dict[str, Any]:
 
 @router.post(
     "/register",
-    response_model=UserResponse,
+    response_model=RegistrationResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["authentication"],
+    description=(
+        "Crée un compte **non activé** et envoie par email un code à 6 chiffres, valable "
+        "15 minutes (à saisir sur `POST /auth/activate`). Si l'email correspond déjà à un "
+        "compte jamais activé, rien n'est créé : le compte en attente est mis à jour, le code "
+        "est renvoyé et la réponse est **200** (au lieu de 201). Un email déjà activé donne 409."
+    ),
 )
-def register(user_data: UserCreate, db: Session = Depends(get_db)):
-    return AuthService(db).register_user(user_data)
+def register(
+    request: Request,
+    response: Response,
+    user_data: UserCreate,
+    db: Session = Depends(get_db),
+):
+    throttle_service.hit_all(request, "register")
+    user, state, created = AuthService(db).register_user(user_data)
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return RegistrationResponse(
+        **UserResponse.model_validate(user).model_dump(),
+        activation_expires_in_seconds=state.expires_in_seconds,
+        resend_available_in_seconds=state.resend_available_in_seconds,
+        activation_code=state.code if settings.DEV_EXPOSE_AUTH_TOKENS else None,
+    )
+
+
+@router.post(
+    "/activate",
+    response_model=TokenResponse,
+    tags=["authentication"],
+    description=(
+        "Active le compte avec le code reçu par email et ouvre la session. Erreurs : code "
+        "incorrect (`attempts_left` dans `details`), expiré, ou trop d'essais (il faut alors "
+        "en redemander un)."
+    ),
+)
+def activate_account(
+    request: Request, data: ActivateAccountRequest, db: Session = Depends(get_db)
+):
+    throttle_service.hit_all(request, "activate", identifier=data.email)
+    service = AuthService(db)
+    user = service.activate_account(data.email, data.code)
+    return TokenResponse(
+        access_token=service.create_access_token({"sub": str(user.id)}),
+        refresh_token=service.create_refresh_token(user.id),
+    )
+
+
+@router.post(
+    "/resend-activation",
+    tags=["authentication"],
+    description=(
+        "Renvoie un code d'activation. Réponse identique que le compte existe ou non, pour ne "
+        "pas révéler quelles adresses sont inscrites. Un nouvel envoi n'est possible qu'une "
+        "minute après le précédent."
+    ),
+)
+def resend_activation(
+    request: Request, data: ResendActivationRequest, db: Session = Depends(get_db)
+):
+    throttle_service.hit_all(request, "resend_activation", identifier=data.email)
+    AuthService(db).resend_activation_code(data.email)
+    return {
+        "message": "If this account is awaiting activation, a new code was sent.",
+        "resend_available_in_seconds": settings.ACTIVATION_CODE_RESEND_SECONDS,
+    }
 
 
 @router.post(

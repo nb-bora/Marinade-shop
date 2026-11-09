@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Optional, List
 import re
 import uuid
@@ -55,6 +56,8 @@ class UserService:
             raise ValueError("Phone number already registered")
         values = user_data.model_dump()
         values["password_hash"] = pwd_context.hash(values.pop("password"))
+        # Compte créé par un administrateur : pas d'inscription, donc pas de code d'activation.
+        values["email_verified_at"] = datetime.now(timezone.utc)
         return self.user_repo.create(values)
 
     def update_user(self, user_id: uuid.UUID, user_data: UserUpdate) -> Optional[User]:

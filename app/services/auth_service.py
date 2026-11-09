@@ -1,7 +1,9 @@
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Union, List
+from typing import Any, Optional, Tuple, Union, List
 import hashlib
 import hmac
+import math
 import re
 import secrets
 import uuid
@@ -32,6 +34,35 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+@dataclass(frozen=True)
+class ActivationStatus:
+    """Où en est le code d'activation d'un compte en attente."""
+
+    # Durée de validité restante du code en cours, en secondes.
+    expires_in_seconds: int
+    # Délai avant de pouvoir demander un nouvel envoi, en secondes.
+    resend_available_in_seconds: int
+    # Vrai si un nouveau code vient d'être émis et envoyé par email.
+    sent: bool = False
+    # Le code en clair, seulement quand il vient d'être émis (jamais renvoyé en production).
+    code: Optional[str] = None
+
+
+def _aware(moment: Optional[datetime]) -> Optional[datetime]:
+    if moment is not None and moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def _hash_activation_code(user_id: Any, code: str) -> str:
+    """Empreinte HMAC liée au compte : le même code chez deux comptes donne deux empreintes."""
+    return hmac.new(
+        settings.SECRET_KEY.encode("utf-8"),
+        f"activation|{user_id}|{code}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 try:
     import pyotp
@@ -203,11 +234,29 @@ class AuthService:
         )
         return token
 
-    def register_user(self, user_data: UserCreate) -> User:
+    # ========== Inscription et activation du compte ==========
+
+    def register_user(self, user_data: UserCreate) -> Tuple[User, ActivationStatus, bool]:
+        """Crée un compte NON activé et envoie un code par email.
+
+        Retourne ``(compte, état du code, créé)``. Si l'email correspond déjà à un compte qui
+        n'a jamais été activé, on ne crée rien : le compte en attente est mis à jour avec les
+        informations saisies (le dernier à avoir reçu le code par email décide du mot de passe,
+        ce qui empêche de « réserver » l'adresse de quelqu'un d'autre) et le code est renvoyé.
+        """
         if not validate_email(user_data.email):
             raise ValidationError("Invalid email format")
-        if self.user_repo.email_exists(user_data.email):
-            raise ConflictError("Email already registered")
+
+        existing = self.user_repo.get_by_email(user_data.email)
+        if existing is not None:
+            if (
+                existing.email_verified_at is not None
+                or not existing.is_active
+                or existing.is_deleted
+            ):
+                raise ConflictError("Email already registered")
+            return self._refresh_pending_account(existing, user_data)
+
         if self.user_repo.phone_exists(user_data.phone):
             raise ConflictError("Phone number already registered")
 
@@ -215,8 +264,153 @@ class AuthService:
         values["role"] = "restaurant"
         values["password_hash"] = self.get_password_hash(values.pop("password"))
         user = self.user_repo.create(values)
+        return user, self.issue_activation_code(user, force=True), True
+
+    def _refresh_pending_account(
+        self, user: User, user_data: UserCreate
+    ) -> Tuple[User, ActivationStatus, bool]:
+        other = self.user_repo.get_by_phone(user_data.phone)
+        if other is not None and other.id != user.id:
+            raise ConflictError("Phone number already registered")
+        self.user_repo.update(
+            user,
+            {
+                "first_name": user_data.first_name,
+                "last_name": user_data.last_name,
+                "phone": user_data.phone,
+                "password_hash": self.get_password_hash(user_data.password),
+            },
+        )
+        return user, self.issue_activation_code(user), False
+
+    def issue_activation_code(self, user: User, *, force: bool = False) -> ActivationStatus:
+        """Émet un code à 6 chiffres (valable 15 min) et l'envoie par email.
+
+        Sans ``force``, un code encore valide envoyé il y a moins de
+        ``ACTIVATION_CODE_RESEND_SECONDS`` n'est pas remplacé : l'état courant est renvoyé.
+        """
+        now = datetime.now(timezone.utc)
+        cooldown = settings.ACTIVATION_CODE_RESEND_SECONDS
+        expires_at = _aware(user.activation_code_expires_at)
+        sent_at = _aware(user.activation_code_sent_at)
+
+        if (
+            not force
+            and user.activation_code_hash
+            and expires_at is not None
+            and expires_at > now
+            and sent_at is not None
+            and (now - sent_at).total_seconds() < cooldown
+        ):
+            return ActivationStatus(
+                expires_in_seconds=int((expires_at - now).total_seconds()),
+                resend_available_in_seconds=math.ceil(
+                    cooldown - (now - sent_at).total_seconds()
+                ),
+            )
+
+        code = "".join(
+            secrets.choice("0123456789") for _ in range(settings.ACTIVATION_CODE_LENGTH)
+        )
+        lifetime = timedelta(minutes=settings.ACTIVATION_CODE_EXPIRE_MINUTES)
+        self.user_repo.update(
+            user,
+            {
+                "activation_code_hash": _hash_activation_code(user.id, code),
+                "activation_code_expires_at": now + lifetime,
+                "activation_code_sent_at": now,
+                "activation_code_attempts": 0,
+            },
+        )
+        auth_emails.send_activation_code(self.db, user, code)
+        logger.info(f"Activation code issued for user {user.id}")
+        return ActivationStatus(
+            expires_in_seconds=int(lifetime.total_seconds()),
+            resend_available_in_seconds=cooldown,
+            sent=True,
+            code=code,
+        )
+
+    def _clear_activation_code(self, user: User) -> None:
+        self.user_repo.update(
+            user,
+            {
+                "activation_code_hash": None,
+                "activation_code_expires_at": None,
+                "activation_code_attempts": 0,
+            },
+        )
+
+    def activate_account(self, email: str, code: str) -> User:
+        """Active le compte si le code est le bon, pas expiré, et pas déjà trop essayé.
+
+        Un email inconnu ou déjà activé donne la même réponse qu'un mauvais code : on ne
+        révèle pas quels comptes existent. Les échecs sont validés (commit) AVANT de lever
+        l'erreur, sinon l'annulation de la requête effacerait le compteur d'essais.
+        """
+        user = self.user_repo.get_by_email(email)
+        if (
+            user is None
+            or user.email_verified_at is not None
+            or not user.is_active
+            or user.is_deleted
+            or not user.activation_code_hash
+        ):
+            _hash_activation_code(uuid.UUID(int=0), code)  # temps de réponse comparable
+            raise ValidationError(code="auth.activation_code_invalid")
+
+        now = datetime.now(timezone.utc)
+        expires_at = _aware(user.activation_code_expires_at)
+        if expires_at is None or expires_at <= now:
+            self._clear_activation_code(user)
+            self.db.commit()
+            raise ValidationError(code="auth.activation_code_expired")
+
+        limit = settings.ACTIVATION_CODE_MAX_ATTEMPTS
+        if user.activation_code_attempts >= limit:
+            self._clear_activation_code(user)
+            self.db.commit()
+            raise ValidationError(code="auth.activation_too_many_attempts")
+
+        if not hmac.compare_digest(
+            user.activation_code_hash, _hash_activation_code(user.id, code)
+        ):
+            attempts = user.activation_code_attempts + 1
+            if attempts >= limit:
+                self._clear_activation_code(user)
+                self.db.commit()
+                raise ValidationError(code="auth.activation_too_many_attempts")
+            self.user_repo.update(user, {"activation_code_attempts": attempts})
+            self.db.commit()
+            raise ValidationError(
+                code="auth.activation_code_invalid",
+                details={"attempts_left": limit - attempts},
+            )
+
+        self.user_repo.update(
+            user,
+            {
+                "email_verified_at": now,
+                "activation_code_hash": None,
+                "activation_code_expires_at": None,
+                "activation_code_attempts": 0,
+            },
+        )
         auth_emails.send_welcome(user)
+        logger.info(f"Account activated for user {user.id}")
         return user
+
+    def resend_activation_code(self, email: str) -> None:
+        """Renvoie un code à un compte en attente. Silencieux pour tout autre cas : la
+        réponse de l'API est identique, qu'un compte existe ou non."""
+        user = self.user_repo.get_by_email(email)
+        if (
+            user is not None
+            and user.email_verified_at is None
+            and user.is_active
+            and not user.is_deleted
+        ):
+            self.issue_activation_code(user)
 
     def authenticate_user(self, login_data: UserLogin) -> User:
         if not validate_email(login_data.email):
@@ -228,6 +422,21 @@ class AuthService:
             or not self.verify_password(login_data.password, user.password_hash)
         ):
             raise AuthenticationError("Invalid credentials")
+        if user.email_verified_at is None:
+            # Mot de passe juste mais compte jamais activé : on renvoie un code (sous réserve
+            # du délai minimal) et on indique au client où le saisir. Le commit précède
+            # l'erreur : sinon son annulation effacerait le code et l'email ne partirait pas.
+            state = self.issue_activation_code(user)
+            self.db.commit()
+            raise AuthenticationError(
+                code="auth.activation_required",
+                details={
+                    "activation_required": True,
+                    "email": user.email,
+                    "activation_expires_in_seconds": state.expires_in_seconds,
+                    "resend_available_in_seconds": state.resend_available_in_seconds,
+                },
+            )
         if user.two_factor_confirmed_at is not None:
             # Le mot de passe est déjà prouvé : révéler que la 2FA est requise
             # n'apprend rien à un attaquant qui ne le connaît pas.
