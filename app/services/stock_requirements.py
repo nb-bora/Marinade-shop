@@ -23,6 +23,7 @@ from app.models.restaurant import (
     PlatComposant,
 )
 from app.services.stock_engine import ZERO, Requirements, merge_requirements
+from app.services.stock_units import round_quantity
 
 Kind = Literal["plat", "combinaison", "boisson", "composant"]
 
@@ -145,7 +146,9 @@ def requirements_for(
         parts.extend({r.id: quantities[r.id]} for r in owned)
 
     merged = merge_requirements(*parts)
-    return {cid: qty for cid, qty in merged.items() if qty > ZERO}
+    # Besoins calculés (quantité x facteur) : arrondis à 3 décimales de façon déterministe, comme la colonne.
+    rounded = {cid: round_quantity(qty) for cid, qty in merged.items()}
+    return {cid: qty for cid, qty in rounded.items() if qty > ZERO}
 
 
 def _sum_by_id(lines: List[ProductLine]) -> Dict[uuid.UUID, Decimal]:

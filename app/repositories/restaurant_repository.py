@@ -455,7 +455,7 @@ class TableRepository(BaseRepository[Table]):
     ) -> List[Table]:
         return (
             self.db.query(Table)
-            .filter(Table.restaurant_id == restaurant_id)
+            .filter(Table.restaurant_id == restaurant_id, Table.deleted_at.is_(None))
             .order_by(Table.created_at, Table.id)
             .offset(skip)
             .limit(limit)
@@ -465,7 +465,11 @@ class TableRepository(BaseRepository[Table]):
     def get_by_statut(self, restaurant_id: uuid.UUID, statut: str) -> List[Table]:
         return (
             self.db.query(Table)
-            .filter(Table.restaurant_id == restaurant_id, Table.statut == statut)
+            .filter(
+                Table.restaurant_id == restaurant_id,
+                Table.statut == statut,
+                Table.deleted_at.is_(None),
+            )
             .all()
         )
 
@@ -474,7 +478,11 @@ class TableRepository(BaseRepository[Table]):
     ) -> List[Table]:
         return (
             self.db.query(Table)
-            .filter(Table.restaurant_id == restaurant_id, Table.statut == "libre")
+            .filter(
+                Table.restaurant_id == restaurant_id,
+                Table.statut == "libre",
+                Table.deleted_at.is_(None),
+            )
             .order_by(Table.created_at, Table.id)
             .offset(skip)
             .limit(limit)
@@ -484,7 +492,11 @@ class TableRepository(BaseRepository[Table]):
     def get_by_numero(self, restaurant_id: uuid.UUID, numero: str) -> Optional[Table]:
         return (
             self.db.query(Table)
-            .filter(Table.restaurant_id == restaurant_id, Table.numero == numero)
+            .filter(
+                Table.restaurant_id == restaurant_id,
+                Table.numero == numero,
+                Table.deleted_at.is_(None),
+            )
             .first()
         )
 

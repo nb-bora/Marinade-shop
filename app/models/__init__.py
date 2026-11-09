@@ -3,6 +3,7 @@ from app.models.tenant import RestaurantMember
 from app.models.operator import MobileOperatorPrefix
 from app.models.subscription import Subscription, SubscriptionTier, DailyBalance
 from app.models.transaction import Transaction, RefreshToken
+from app.models.security import AuthOneTimeUse, AuthSession, AuthThrottle
 from app.models.payment import (
     PaymentConfiguration,
     PaymentIntent,
@@ -25,6 +26,19 @@ from app.models.restaurant import (
     Commande,
     CommandeItem,
     CommandeRefund,
+)
+from app.models.stock import (
+    UniteConversion,
+    Fournisseur,
+    ComposantFournisseur,
+    StockLot,
+    BonCommande,
+    BonCommandeLigne,
+    Reception,
+    ReceptionLigne,
+    Inventaire,
+    InventaireLigne,
+    CatalogueHistoriquePrix,
 )
 from app.models.pressing import (
     PressingTarif,
@@ -55,6 +69,17 @@ from app.models.ros import (
 from app.models.reservation import Reservation, ReservationGuest, WaitlistEntry
 
 __all__ = [
+    "UniteConversion",
+    "Fournisseur",
+    "ComposantFournisseur",
+    "StockLot",
+    "BonCommande",
+    "BonCommandeLigne",
+    "Reception",
+    "ReceptionLigne",
+    "Inventaire",
+    "InventaireLigne",
+    "CatalogueHistoriquePrix",
     "User",
     "RestaurantMember",
     "MobileOperatorPrefix",
@@ -63,6 +88,9 @@ __all__ = [
     "DailyBalance",
     "Transaction",
     "RefreshToken",
+    "AuthSession",
+    "AuthThrottle",
+    "AuthOneTimeUse",
     "PaymentConfiguration",
     "PaymentIntent",
     "PaymentEvent",

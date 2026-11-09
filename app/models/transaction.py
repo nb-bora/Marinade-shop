@@ -57,6 +57,16 @@ class RefreshToken(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     token_hash = Column(String(255), unique=True, nullable=False)
+    # Famille de jetons (session) : la réutilisation d'un jeton déjà échangé révoque
+    # toute la famille (ASVS 7.2.4 / détection de vol de jeton de rafraîchissement).
+    session_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("auth_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    # Renseigné quand le jeton a été échangé : il n'est plus jamais accepté.
+    used_at = Column(DateTime(timezone=True), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

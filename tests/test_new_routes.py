@@ -697,7 +697,7 @@ class TestKdsStream:
 
         # Un seul TestClient « contexte » : l'écran et les requêtes partagent la boucle d'événements.
         with TestClient(app) as shared:
-            with shared.websocket_connect(f"/v1/ros/ws/kds/{rid}/KITCHEN", subprotocols=["bearer", token]) as screen:
+            with shared.websocket_connect(f"/v1/ros/ws/kds/{rid}/BAR", subprotocols=["bearer", token]) as screen:
                 # Garde-fou : sans événement, l'écran se ferme au bout de 20 s au lieu de bloquer.
                 guard = threading.Timer(20, screen.close)
                 guard.daemon = True
@@ -713,15 +713,16 @@ class TestKdsStream:
                 assert order.status_code == 201, order.text
                 created = screen.receive_json()
                 assert created["event"] == "ticket.created"
-                assert created["restaurant_id"] == rid and created["station"] == "KITCHEN"
+                assert created["restaurant_id"] == rid and created["station"] == "BAR"
                 ticket = created["ticket"]
                 assert ticket["status"] == "QUEUED" and ticket["order_id"] == order.json()["id"]
                 assert ticket["items_jsonb"][0]["quantity"] == 2
 
-                moved = shared.put(
-                    f"/v1/ros/restaurants/{rid}/tickets/{ticket['id']}/status", headers=h, json={"status": "READY"}
-                )
-                assert moved.status_code == 200, moved.text
-                updated = screen.receive_json()
-                assert updated["event"] == "ticket.updated" and updated["ticket"]["id"] == ticket["id"]
-                assert updated["ticket"]["status"] == "READY"
+                for target in ("IN_PREPARATION", "READY"):
+                    moved = shared.put(
+                        f"/v1/ros/restaurants/{rid}/tickets/{ticket['id']}/status", headers=h, json={"status": target}
+                    )
+                    assert moved.status_code == 200, moved.text
+                    updated = screen.receive_json()
+                    assert updated["event"] == "ticket.updated" and updated["ticket"]["id"] == ticket["id"]
+                    assert updated["ticket"]["status"] == target

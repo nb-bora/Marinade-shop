@@ -75,16 +75,8 @@ class NotificationChannel(ABC):
 
 
 class EmailNotification(NotificationChannel):
-    """Notifications par email"""
-
-    def __init__(self, config: Dict[str, Any] = None):
-        super().__init__(config)
-        self.smtp_server = self.config.get("smtp_server", "smtp.gmail.com")
-        self.smtp_port = self.config.get("smtp_port", 587)
-        self.smtp_username = self.config.get("smtp_username")
-        self.smtp_password = self.config.get("smtp_password")
-        self.from_email = self.config.get("from_email", "noreply@marinade.com")
-        self.from_name = self.config.get("from_name", "Marinade")
+    """Notifications par email. Transport et expéditeur : ``app.services.email_service``
+    (variables SMTP_* / EMAIL_* de l'environnement)."""
 
     def send_notification(
         self,
@@ -112,9 +104,17 @@ class EmailNotification(NotificationChannel):
         )
 
         try:
-            # TODO: Intégration réelle avec SMTP
-            # Pour l'instant, simulation
-            result = self._simulate_email_send(recipient, final_subject, final_message)
+            from app.services import email_service
+
+            paragraphs = [p.strip() for p in final_message.split("\n\n") if p.strip()]
+            greeting = paragraphs[0] if paragraphs else ""
+            text, html_body = email_service.render_email(
+                title=final_subject,
+                greeting=greeting,
+                paragraphs=paragraphs[1:],
+                signature="",
+            )
+            result = email_service.send_email(recipient, final_subject, text, html_body)
 
             return {
                 "success": result["success"],
@@ -123,6 +123,7 @@ class EmailNotification(NotificationChannel):
                 "subject": final_subject,
                 "message_id": result.get("message_id"),
                 "timestamp": result.get("timestamp"),
+                **({"error": result["error"]} if not result["success"] else {}),
             }
         except Exception as e:
             logger.error(f"Email sending error: {str(e)}")
@@ -182,20 +183,6 @@ class EmailNotification(NotificationChannel):
         except KeyError as e:
             logger.warning(f"Template variable missing: {e}")
             return template
-
-    def _simulate_email_send(
-        self, recipient: str, subject: str, message: str
-    ) -> Dict[str, Any]:
-        """Simulation d'envoi d'email (à remplacer par l'intégration SMTP réelle)"""
-        import time
-        import uuid
-
-
-        return {
-            "success": True,
-            "message_id": str(uuid.uuid4()),
-            "timestamp": time.time(),
-        }
 
 
 class SMSNotification(NotificationChannel):

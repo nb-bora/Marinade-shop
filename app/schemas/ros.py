@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
 from uuid import UUID
 from decimal import Decimal
@@ -45,6 +45,13 @@ class SessionCreate(BaseModel):
     customer_id: Optional[UUID] = None
     table_id: Optional[UUID] = None
     table_context: Optional[str] = None  # e.g., 'Terrasse Gauche', 'Comptoir Bar', NULL
+
+
+class SessionUpdate(BaseModel):
+    """Modification d'une session ouverte : pour l'instant son contexte (« 4 couverts · Terrasse »),
+    qui porte le nombre de couverts affiché sur le plan de salle."""
+
+    table_context: Optional[str] = Field(None, max_length=100)
 
 
 class SessionResponse(BaseModel):
@@ -130,13 +137,47 @@ class TicketResponse(BaseModel):
     status: TicketStatus
     items_jsonb: Optional[List[Dict[str, Any]]] = None
     created_at: datetime
+    started_at: Optional[datetime] = None
     ready_at: Optional[datetime] = None
+    served_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    priority: int = 0
+    course: Optional[int] = None
+    # Où servir : « Table 4 » et sa zone (emplacement de la table ou contexte de la session).
+    # Vides pour une commande sans table (à emporter, comptoir).
+    table_label: Optional[str] = None
+    zone: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
 
 class TicketStatusUpdate(BaseModel):
     status: TicketStatus
+
+
+class TicketPriorityUpdate(BaseModel):
+    """0 = normal, 1 = urgent (passe en tête de file)."""
+
+    priority: Literal[0, 1]
+
+
+class TicketSummaryItem(BaseModel):
+    product_name: str
+    quantity: int
+
+
+class TicketSummaryResponse(BaseModel):
+    """« Tout le service » : quantités par article sur les tickets à faire de la fenêtre."""
+
+    station: ProductionStation
+    window_hours: int
+    ticket_count: int
+    total_quantity: int
+    items: List[TicketSummaryItem]
+
+
+class TicketExpireResponse(BaseModel):
+    cancelled: int
 
 
 # INVOICE SCHEMAS

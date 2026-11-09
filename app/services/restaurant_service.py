@@ -287,31 +287,46 @@ class StockService:
         return self._stock_state(stock)
 
     def add_movement(self, composant_id: uuid.UUID, data: StockMouvementCreate) -> dict:
+        """Mouvement manuel : passe par le moteur (journal, lots, motifs, alertes).
+
+        ``entree`` = réception ; ``sortie``/``perte`` = sortie hors vente (motif requis) ;
+        ``ajustement`` = nouvelle quantité constatée (motif requis).
+        """
+        from app.services.stock_engine import StockEngine, validate_motif
+        from app.services.stock_errors import StockNotFound
+
         composant = self.composant_repo.get(str(composant_id))
         if not composant:
-            raise ValueError("Composant not found")
-        stock = self.stock_repo.get_by_composant_id(composant_id, lock=True)
-        if not stock:
-            raise ValueError("Stock not initialized for component")
+            raise StockNotFound("stock.composant_introuvable", "Composant introuvable.")
+        engine = StockEngine(self.db)
         if data.type == "entree":
-            stock.quantite += data.quantite
+            engine.receive(
+                composant.restaurant_id,
+                composant_id,
+                data.quantite,
+                cout_unitaire=data.cout_unitaire,
+                lot_numero=data.lot_numero,
+                date_peremption=data.date_peremption,
+                fournisseur_id=data.fournisseur_id,
+                reference_type="manuel",
+                notes=data.notes,
+            )
         elif data.type == "ajustement":
-            stock.quantite = data.quantite
-            if stock.quantite < stock.reservee:
-                raise ValueError("Stock cannot be lower than reserved quantity")
+            motif = validate_motif("ajustement", data.motif, data.notes)
+            engine.ajustement(
+                composant.restaurant_id,
+                composant_id,
+                data.quantite,
+                motif=motif,
+                notes=data.notes,
+                reference_type="manuel",
+            )
         else:
-            available = stock.quantite - stock.reservee
-            if data.quantite > available:
-                raise ValueError("Insufficient available stock")
-            stock.quantite -= data.quantite
-        self.mouvement_repo.create(
-            {
-                "composant_id": composant_id,
-                "type": data.type,
-                "quantite": data.quantite,
-                "notes": data.notes,
-            }
-        )
+            motif = validate_motif("sortie", data.motif, data.notes)
+            engine.sortie_manuelle(
+                composant.restaurant_id, composant_id, data.quantite, motif=motif, notes=data.notes
+            )
+        stock = self.stock_repo.get_by_composant_id(composant_id)
         self.db.refresh(stock)
         return self._stock_state(stock)
 
@@ -667,7 +682,36 @@ class TableService:
         return table
 
     def get_table(self, table_id: uuid.UUID) -> Optional[Table]:
-        return self.table_repo.get(str(table_id))
+        table = self.table_repo.get(str(table_id))
+        return None if table is None or table.deleted_at is not None else table
+
+    def delete_table(self, table_id: uuid.UUID) -> bool:
+        """Suppression logique : la table disparaît du plan et libère son numéro, l'historique
+        des sessions et des commandes qui la citent reste intact. Refusée tant qu'une session
+        est ouverte sur la table."""
+        from datetime import datetime, timezone
+
+        from app.models.ros import ServiceSession
+
+        table = self.get_table(table_id)
+        if table is None:
+            return False
+        open_session = (
+            self.db.query(ServiceSession.id)
+            .filter(
+                ServiceSession.table_id == table.id,
+                ServiceSession.status.in_(
+                    ("OPEN", "ACTIVE", "PAYMENT_PENDING", "PARTIALLY_PAID")
+                ),
+            )
+            .first()
+        )
+        if open_session is not None or table.statut == "occupee":
+            raise ConflictError("Cette table est occupée : libérez-la avant de la supprimer")
+        table.deleted_at = datetime.now(timezone.utc)
+        self.db.flush()
+        logger.info(f"Table deleted: {table_id}")
+        return True
 
     def get_restaurant_tables(
         self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
@@ -682,7 +726,7 @@ class TableService:
     def update_table(
         self, table_id: uuid.UUID, table_data: TableUpdate
     ) -> Optional[Table]:
-        table = self.table_repo.get(str(table_id))
+        table = self.get_table(table_id)
         if not table:
             logger.warning(f"Table not found for update: {table_id}")
             return None

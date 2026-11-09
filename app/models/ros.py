@@ -10,6 +10,7 @@ from sqlalchemy import (
     Boolean,
     ForeignKey,
     Index,
+    SmallInteger,
     CheckConstraint,
     UniqueConstraint,
 )
@@ -113,6 +114,8 @@ class RosOrder(Base):
     idempotency_key = Column(
         UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4
     )
+    # Garde d'idempotence : le stock d'une commande annulée n'est restitué qu'une fois.
+    stock_restitue_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -176,7 +179,14 @@ class ProductionTicket(Base):
     status = Column(String(30), default=TicketStatus.QUEUED.value, nullable=False)
     items_jsonb = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Horodatages de chaque transition (le retour arrière les remet à NULL).
+    started_at = Column(DateTime(timezone=True), nullable=True)
     ready_at = Column(DateTime(timezone=True), nullable=True)
+    served_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    # 0 = normal ; plus haut = passe en tête de file. course : 1 entrée, 2 plat, 3 dessert…
+    priority = Column(SmallInteger, nullable=False, default=0, server_default="0")
+    course = Column(SmallInteger, nullable=True)
 
     __table_args__ = (
         Index("idx_prod_ticket_restaurant", "restaurant_id"),

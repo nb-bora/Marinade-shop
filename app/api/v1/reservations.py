@@ -1,33 +1,44 @@
-from datetime import datetime, timezone
+"""Réservations et liste d'attente.
+
+Les règles vivent dans ``app/services/reservation_service.py`` ; ces routes ne font que
+l'autorisation, la lecture et le format de réponse.
+"""
+
+from datetime import date, datetime
 from typing import Dict, List, Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, func, or_
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.api import permissions as perm
-from app.api.dependencies import get_current_user, require_tenant_path
+from app.api.dependencies import (
+    _role_names,
+    ensure_tenant_role,
+    get_current_user,
+    require_tenant_path,
+)
 from app.api.pagination import Page, page_params
 from app.core.database import get_db
 from app.models.reservation import Reservation, ReservationGuest, WaitlistEntry
-from app.models.restaurant import Table
-from app.models.ros import RosCustomer
 from app.models.user import User
 from app.schemas.reservation import (
-    ReservationCreate,
-    ReservationUpdate,
-    ReservationResponse,
+    ClientRecherche,
+    ClientResume,
+    DisponibiliteResponse,
     ReservationCancelRequest,
     ReservationConfirmRequest,
-    ReservationListFilters,
-    ReservationGuestCreate,
+    ReservationCreate,
     ReservationGuestResponse,
+    ReservationResponse,
+    ReservationUpdate,
     WaitlistCreate,
-    WaitlistUpdate,
     WaitlistResponse,
 )
-from app.utils.enums import ReservationStatus
+from app.services import availability_service as av
+from app.services.reservation_service import ReservationService, WaitlistService
+from app.utils.exceptions import AuthorizationError
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -38,42 +49,50 @@ router = APIRouter(
     dependencies=[Depends(require_tenant_path), Depends(perm.RESERVATION_DESK)],
 )
 
+DUREE_DEFAUT = 90
 
-def _ensure_same_restaurant(
-    db: Session,
-    restaurant_id: uuid.UUID,
-    *,
-    table_ids: tuple = (),
-    customer_id: Optional[uuid.UUID] = None,
-) -> None:
-    """Reject ids that point at ANOTHER restaurant's rows.
 
-    A foreign key only proves the row exists, not that it is the caller's. Without
-    this, a user authorized on restaurant A could attach restaurant B's table or
-    customer to a reservation by putting its UUID in the request body.
-    """
-    for table_id in table_ids:
-        if table_id is None:
-            continue
-        table = db.get(Table, table_id)
-        if table is None or table.restaurant_id != restaurant_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid table for this restaurant",
-            )
-    if customer_id is not None:
-        customer = db.get(RosCustomer, customer_id)
-        if customer is None or customer.restaurant_id != restaurant_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid customer for this restaurant",
-            )
+def _peut_gerer(db: Session, user: User, restaurant_id: uuid.UUID) -> bool:
+    try:
+        ensure_tenant_role(db, user, restaurant_id, perm.MANAGEMENT_ROLES)
+    except HTTPException:
+        return False
+    return True
+
+
+def _forcer(db: Session, user: User, restaurant_id: uuid.UUID, demande: bool) -> bool:
+    """``force=true`` n'est accepté que pour la gestion : sinon 403 explicite."""
+    if not demande:
+        return False
+    if not _peut_gerer(db, user, restaurant_id):
+        raise AuthorizationError(
+            "Seule la gestion peut forcer une réservation (capacité, horaires, date passée)."
+        )
+    return True
+
+
+def _autoriser(db: Session, user: User, restaurant_id: uuid.UUID) -> None:
+    """Contrôle explicite du restaurant de la ressource, en plus de la RLS."""
+    ensure_tenant_role(db, user, restaurant_id, _role_names(perm.RESERVATION_ROLES))
+
+
+def _charger(db: Session, reservation_id: uuid.UUID, user: User) -> Reservation:
+    service = ReservationService(db)
+    reservation = service.charger(reservation_id)
+    _autoriser(db, user, reservation.restaurant_id)
+    return reservation
+
+
+def _charger_entree(db: Session, entry_id: uuid.UUID, user: User) -> WaitlistEntry:
+    entry = WaitlistService(db).charger(entry_id)
+    _autoriser(db, user, entry.restaurant_id)
+    return entry
 
 
 def _guests_by_reservation(
     db: Session, reservation_ids: List[uuid.UUID]
 ) -> Dict[uuid.UUID, List[ReservationGuest]]:
-    """Invites de plusieurs reservations en UNE requete (evite un N+1)."""
+    """Invités de plusieurs réservations en UNE requête (évite un N+1)."""
     grouped: Dict[uuid.UUID, List[ReservationGuest]] = {r: [] for r in reservation_ids}
     if not reservation_ids:
         return grouped
@@ -88,32 +107,25 @@ def _guests_by_reservation(
     return grouped
 
 
-def _reservation_to_response(
-    db: Session,
-    reservation: Reservation,
-    guests: Optional[List[ReservationGuest]] = None,
+def _reservation_out(
+    reservation: Reservation, guests: Optional[List[ReservationGuest]] = None
 ) -> ReservationResponse:
-    if guests is None:
-        guests = _guests_by_reservation(db, [reservation.id])[reservation.id]
-    invite_responses = [ReservationGuestResponse.model_validate(i) for i in guests]
+    invites = [ReservationGuestResponse.model_validate(g) for g in (guests or [])]
     data = {c.name: getattr(reservation, c.name) for c in reservation.__table__.columns}
-    data["invites"] = invite_responses
+    data["invites"] = invites
     return ReservationResponse.model_validate(data)
 
 
-def _create_reservation_guests(
-    db: Session, reservation_id: uuid.UUID, invites: List[ReservationGuestCreate]
-):
-    for invite in invites:
-        guest = ReservationGuest(
-            reservation_id=reservation_id,
-            name=invite.name,
-            age_category=invite.age_category,
-            is_vegetarian=invite.is_vegetarian,
-            allergenes=invite.allergenes,
-            notes=invite.notes,
-        )
-        db.add(guest)
+def _reservation_detail(db: Session, reservation: Reservation) -> ReservationResponse:
+    guests = _guests_by_reservation(db, [reservation.id])[reservation.id]
+    return _reservation_out(reservation, guests)
+
+
+def _waitlist_out(entry: WaitlistEntry) -> WaitlistResponse:
+    return WaitlistResponse.model_validate(entry)
+
+
+# ---------------------------------------------------------------------------- réservations
 
 
 @router.post(
@@ -124,39 +136,16 @@ def _create_reservation_guests(
 def create_reservation(
     restaurant_id: uuid.UUID,
     reservation_data: ReservationCreate,
+    force: bool = Query(False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ensure_same_restaurant(
-        db,
-        restaurant_id,
-        table_ids=(reservation_data.table_id,),
-        customer_id=reservation_data.customer_id,
+    _autoriser(db, current_user, restaurant_id)
+    forcer = _forcer(db, current_user, restaurant_id, force)
+    reservation = ReservationService(db).create(
+        restaurant_id, reservation_data, user_id=current_user.id, forcer=forcer
     )
-    reservation = Reservation(
-        restaurant_id=restaurant_id,
-        table_id=reservation_data.table_id,
-        customer_id=reservation_data.customer_id,
-        created_by=current_user.id,
-        customer_name=reservation_data.customer_name,
-        customer_phone=reservation_data.customer_phone,
-        customer_email=reservation_data.customer_email,
-        status=ReservationStatus.PENDING.value,
-        party_size=reservation_data.party_size,
-        reservation_date=reservation_data.reservation_date,
-        duration_minutes=reservation_data.duration_minutes,
-        notes=reservation_data.notes,
-        source=reservation_data.source,
-        reminder_sent=reservation_data.reminder_sent,
-        arrival_notes=reservation_data.arrival_notes,
-        preferences_jsonb=reservation_data.preferences_jsonb,
-    )
-    db.add(reservation)
-    db.flush()
-    _create_reservation_guests(db, reservation.id, reservation_data.invites)
-    db.flush()
-    db.refresh(reservation)
-    return _reservation_to_response(db, reservation)
+    return _reservation_detail(db, reservation)
 
 
 @router.get(
@@ -167,13 +156,14 @@ def list_reservations(
     restaurant_id: uuid.UUID,
     date_from: Optional[datetime] = Query(None),
     date_to: Optional[datetime] = Query(None),
-    status: Optional[str] = Query(None, max_length=30),
+    status_filter: Optional[str] = Query(None, alias="status", max_length=30),
     table_id: Optional[uuid.UUID] = Query(None),
     search: Optional[str] = Query(None, max_length=255),
     page: Page = Depends(page_params),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _autoriser(db, current_user, restaurant_id)
     query = db.query(Reservation).filter(
         Reservation.restaurant_id == restaurant_id, Reservation.deleted_at.is_(None)
     )
@@ -181,18 +171,18 @@ def list_reservations(
         query = query.filter(Reservation.reservation_date >= date_from)
     if date_to:
         query = query.filter(Reservation.reservation_date <= date_to)
-    if status:
-        query = query.filter(Reservation.status == status)
+    if status_filter:
+        query = query.filter(Reservation.status == status_filter)
     if table_id:
         query = query.filter(Reservation.table_id == table_id)
     if search:
-        search_pattern = f"%{search}%"
+        motif = f"%{search}%"
         query = query.filter(
             or_(
-                Reservation.customer_name.ilike(search_pattern),
-                Reservation.customer_phone.ilike(search_pattern),
-                Reservation.customer_email.ilike(search_pattern),
-                Reservation.notes.ilike(search_pattern),
+                Reservation.customer_name.ilike(motif),
+                Reservation.customer_phone.ilike(motif),
+                Reservation.customer_email.ilike(motif),
+                Reservation.notes.ilike(motif),
             )
         )
     reservations = (
@@ -202,7 +192,54 @@ def list_reservations(
         .all()
     )
     guests = _guests_by_reservation(db, [r.id for r in reservations])
-    return [_reservation_to_response(db, r, guests[r.id]) for r in reservations]
+    return [_reservation_out(r, guests[r.id]) for r in reservations]
+
+
+@router.get(
+    "/restaurants/{restaurant_id}/availability",
+    response_model=DisponibiliteResponse,
+)
+def get_availability(
+    restaurant_id: uuid.UUID,
+    date_jour: date = Query(..., alias="date"),
+    party_size: int = Query(..., gt=0, le=500),
+    duration: int = Query(DUREE_DEFAUT, gt=0, le=av.DUREE_MAX_MIN),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _autoriser(db, current_user, restaurant_id)
+    return ReservationService(db).disponibilite(restaurant_id, date_jour, party_size, duration)
+
+
+@router.get(
+    "/restaurants/{restaurant_id}/customers/search",
+    response_model=List[ClientRecherche],
+)
+def search_customers(
+    restaurant_id: uuid.UUID,
+    q: str = Query(..., min_length=2, max_length=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _autoriser(db, current_user, restaurant_id)
+    clients = ReservationService(db).rechercher_clients(restaurant_id, q)
+    return [
+        ClientRecherche(id=c.id, name=c.name, phone=c.phone, email=c.email) for c in clients
+    ]
+
+
+@router.get(
+    "/restaurants/{restaurant_id}/customers/{customer_id}/summary",
+    response_model=ClientResume,
+)
+def customer_summary(
+    restaurant_id: uuid.UUID,
+    customer_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _autoriser(db, current_user, restaurant_id)
+    return ClientResume(**ReservationService(db).resume_client(restaurant_id, customer_id))
 
 
 @router.get(
@@ -214,16 +251,7 @@ def get_reservation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = (
-        db.query(Reservation)
-        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
-        .first()
-    )
-    if reservation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
-        )
-    return _reservation_to_response(db, reservation)
+    return _reservation_detail(db, _charger(db, reservation_id, current_user))
 
 
 @router.put(
@@ -233,30 +261,15 @@ def get_reservation(
 def update_reservation(
     reservation_id: uuid.UUID,
     update_data: ReservationUpdate,
+    force: bool = Query(False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = (
-        db.query(Reservation)
-        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
-        .first()
-    )
-    if reservation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
-        )
+    reservation = _charger(db, reservation_id, current_user)
+    forcer = _forcer(db, current_user, reservation.restaurant_id, force)
     changes = update_data.model_dump(exclude_unset=True)
-    _ensure_same_restaurant(
-        db,
-        reservation.restaurant_id,
-        table_ids=(changes.get("table_id"),),
-        customer_id=changes.get("customer_id"),
-    )
-    for field, value in changes.items():
-        setattr(reservation, field, value)
-    db.flush()
-    db.refresh(reservation)
-    return _reservation_to_response(db, reservation)
+    updated = ReservationService(db).update(reservation, changes, forcer=forcer)
+    return _reservation_detail(db, updated)
 
 
 @router.delete(
@@ -265,112 +278,74 @@ def update_reservation(
 )
 def delete_reservation(
     reservation_id: uuid.UUID,
-    reason: Optional[str] = Query(None),
+    reason: Optional[str] = Query(None, max_length=500),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = (
-        db.query(Reservation)
-        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
-        .first()
-    )
-    if reservation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
-        )
-    # Suppression logique : la ligne et ses invités restent en base (historique,
-    # no-show, statistiques) mais disparaissent de l'API et libèrent la table.
-    reservation.deleted_at = datetime.now(timezone.utc)
-    if reason:
-        reservation.cancel_reason = reason
-    db.flush()
-    logger.info(
-        "Reservation soft-deleted: %s by user=%s", reservation_id, current_user.id
-    )
+    reservation = _charger(db, reservation_id, current_user)
+    # Suppression logique : la ligne et ses invités restent pour l'historique.
+    ReservationService(db).supprimer(reservation, reason)
+    logger.info("Reservation soft-deleted: %s by user=%s", reservation_id, current_user.id)
     return None
 
 
-@router.post(
-    "/{reservation_id}/confirm",
-    response_model=ReservationResponse,
-)
+@router.post("/{reservation_id}/confirm", response_model=ReservationResponse)
 def confirm_reservation(
     reservation_id: uuid.UUID,
     request_data: Optional[ReservationConfirmRequest] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = (
-        db.query(Reservation)
-        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
-        .first()
-    )
-    if reservation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
-        )
-    reservation.status = ReservationStatus.CONFIRMED.value
-    reservation.confirmed_at = datetime.now(timezone.utc)
-    if request_data and request_data.notes and reservation.notes:
-        reservation.notes = reservation.notes + "\n" + request_data.notes
-    elif request_data and request_data.notes:
-        reservation.notes = request_data.notes
-    db.flush()
-    db.refresh(reservation)
-    return _reservation_to_response(db, reservation)
+    reservation = _charger(db, reservation_id, current_user)
+    notes = request_data.notes if request_data else None
+    confirmed = ReservationService(db).confirmer(reservation, notes)
+    return _reservation_detail(db, confirmed)
 
 
-@router.post(
-    "/{reservation_id}/check-in",
-    response_model=ReservationResponse,
-)
+@router.post("/{reservation_id}/check-in", response_model=ReservationResponse)
 def check_in_reservation(
     reservation_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = (
-        db.query(Reservation)
-        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
-        .first()
-    )
-    if reservation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
-        )
-    reservation.status = ReservationStatus.CHECKED_IN.value
-    reservation.checked_in_at = datetime.now(timezone.utc)
-    db.flush()
-    db.refresh(reservation)
-    return _reservation_to_response(db, reservation)
+    reservation = _charger(db, reservation_id, current_user)
+    arrived = ReservationService(db).arriver(reservation)
+    return _reservation_detail(db, arrived)
 
 
-@router.post(
-    "/{reservation_id}/cancel",
-    response_model=ReservationResponse,
-)
+@router.post("/{reservation_id}/no-show", response_model=ReservationResponse)
+def no_show_reservation(
+    reservation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    reservation = _charger(db, reservation_id, current_user)
+    return _reservation_detail(db, ReservationService(db).absent(reservation))
+
+
+@router.post("/{reservation_id}/complete", response_model=ReservationResponse)
+def complete_reservation(
+    reservation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    reservation = _charger(db, reservation_id, current_user)
+    return _reservation_detail(db, ReservationService(db).terminer(reservation))
+
+
+@router.post("/{reservation_id}/cancel", response_model=ReservationResponse)
 def cancel_reservation(
     reservation_id: uuid.UUID,
     cancel_data: ReservationCancelRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    reservation = (
-        db.query(Reservation)
-        .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
-        .first()
-    )
-    if reservation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
-        )
-    reservation.status = ReservationStatus.CANCELLED.value
-    reservation.cancelled_at = datetime.now(timezone.utc)
-    reservation.cancelled_by = current_user.id
-    reservation.cancel_reason = cancel_data.reason
-    db.flush()
-    db.refresh(reservation)
-    return _reservation_to_response(db, reservation)
+    reservation = _charger(db, reservation_id, current_user)
+    cancelled = ReservationService(db).annuler(reservation, current_user.id, cancel_data.reason)
+    return _reservation_detail(db, cancelled)
+
+
+# ---------------------------------------------------------------------------- liste d'attente
 
 
 @router.post(
@@ -384,36 +359,8 @@ def create_waitlist_entry(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ensure_same_restaurant(
-        db, restaurant_id, table_ids=(waitlist_data.requested_table_id,)
-    )
-    max_position = (
-        db.query(func.coalesce(func.max(WaitlistEntry.position), 0))
-        .filter(
-            WaitlistEntry.restaurant_id == restaurant_id,
-            WaitlistEntry.status == "WAITING",
-        )
-        .scalar()
-    )
-    entry = WaitlistEntry(
-        restaurant_id=restaurant_id,
-        customer_name=waitlist_data.customer_name,
-        customer_phone=waitlist_data.customer_phone,
-        customer_email=waitlist_data.customer_email,
-        party_size=waitlist_data.party_size,
-        requested_table_id=waitlist_data.requested_table_id,
-        position=max_position + 1,
-        estimated_wait_minutes=waitlist_data.estimated_wait_minutes,
-        status="WAITING",
-        source=waitlist_data.source,
-        notes=waitlist_data.notes,
-        preferences_jsonb=waitlist_data.preferences_jsonb,
-        joined_at=datetime.now(timezone.utc),
-    )
-    db.add(entry)
-    db.flush()
-    db.refresh(entry)
-    return WaitlistResponse.model_validate(entry)
+    _autoriser(db, current_user, restaurant_id)
+    return _waitlist_out(WaitlistService(db).creer(restaurant_id, waitlist_data))
 
 
 @router.get(
@@ -422,44 +369,46 @@ def create_waitlist_entry(
 )
 def list_waitlist(
     restaurant_id: uuid.UUID,
+    status_filter: Optional[str] = Query(None, alias="status", max_length=30),
     page: Page = Depends(page_params),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _autoriser(db, current_user, restaurant_id)
+    query = db.query(WaitlistEntry).filter(WaitlistEntry.restaurant_id == restaurant_id)
+    if status_filter:
+        query = query.filter(WaitlistEntry.status == status_filter)
     entries = (
-        db.query(WaitlistEntry)
-        .filter(WaitlistEntry.restaurant_id == restaurant_id)
-        .order_by(WaitlistEntry.position.asc(), WaitlistEntry.id)
+        query.order_by(WaitlistEntry.position.asc(), WaitlistEntry.id)
         .offset(page.skip)
         .limit(page.limit)
         .all()
     )
-    return [WaitlistResponse.model_validate(e) for e in entries]
+    return [_waitlist_out(e) for e in entries]
 
 
-@router.post(
-    "/waitlist/{waitlist_id}/seat",
-    response_model=WaitlistResponse,
-)
+@router.post("/waitlist/{waitlist_id}/seat", response_model=WaitlistResponse)
 def seat_waitlist_entry(
     waitlist_id: uuid.UUID,
     table_id: Optional[uuid.UUID] = Query(None),
+    force: bool = Query(False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    entry = db.query(WaitlistEntry).filter(WaitlistEntry.id == waitlist_id).first()
-    if entry is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Waitlist entry not found"
-        )
-    _ensure_same_restaurant(db, entry.restaurant_id, table_ids=(table_id,))
-    entry.status = "SEATED"
-    entry.seated_at = datetime.now(timezone.utc)
-    if table_id:
-        entry.assigned_table_id = table_id
-    db.flush()
-    db.refresh(entry)
-    return WaitlistResponse.model_validate(entry)
+    entry = _charger_entree(db, waitlist_id, current_user)
+    forcer = _forcer(db, current_user, entry.restaurant_id, force)
+    return _waitlist_out(WaitlistService(db).installer(entry, table_id, forcer=forcer))
+
+
+@router.post("/waitlist/{waitlist_id}/notify", response_model=Dict[str, object])
+def notify_waitlist_entry(
+    waitlist_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    entry = _charger_entree(db, waitlist_id, current_user)
+    adresse = WaitlistService(db).prevenir(entry)
+    return {"envoye": True, "destinataire": adresse}
 
 
 @router.delete(
@@ -468,20 +417,10 @@ def seat_waitlist_entry(
 )
 def remove_waitlist_entry(
     waitlist_id: uuid.UUID,
-    reason: Optional[str] = Query(None),
+    reason: Optional[str] = Query(None, max_length=500),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    entry = db.query(WaitlistEntry).filter(WaitlistEntry.id == waitlist_id).first()
-    if entry is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Waitlist entry not found"
-        )
-    entry.status = "REMOVED"
-    entry.removed_at = datetime.now(timezone.utc)
-    if reason and entry.notes:
-        entry.notes = entry.notes + "\n" + reason
-    elif reason:
-        entry.notes = reason
-    db.flush()
+    entry = _charger_entree(db, waitlist_id, current_user)
+    WaitlistService(db).retirer(entry, reason)
     return None

@@ -554,11 +554,15 @@ class EasyTransactPaymentService:
         if reference and reference.strip():
             start = reference.strip()
             # L'intervalle est ce que l'index sait parcourir (LIKE, lui, ne peut pas
-            # servir de condition d'index sous RLS) ; le LIKE reste pour la justesse,
-            # car l'ordre d'une collation locale n'est pas celui des octets.
+            # servir de condition d'index sous RLS) ; le LIKE reste pour la justesse.
+            # La borne haute suppose l'ordre des OCTETS : avec une collation locale
+            # (en_US.utf8, celle de la plupart des PostgreSQL gérés) elle exclurait des
+            # lignes valides. On compare donc en collation "C", servie par l'index
+            # idx_payment_intent_restaurant_reference_c.
+            reference_c = PaymentIntent.vendor_reference.collate("C")
             query = query.where(
-                PaymentIntent.vendor_reference >= start,
-                PaymentIntent.vendor_reference < start[:-1] + chr(ord(start[-1]) + 1),
+                reference_c >= start,
+                reference_c < start[:-1] + chr(ord(start[-1]) + 1),
                 PaymentIntent.vendor_reference.startswith(start, autoescape=True),
             )
         if commande_id is not None:

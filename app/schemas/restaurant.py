@@ -1,11 +1,31 @@
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import List, Literal, Optional
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 import uuid
 
 
 TypeEtablissement = Literal["restaurant", "pressing"]
+
+FUSEAU_DEFAUT = "Africa/Douala"
+
+
+def _fuseau_iana(valeur: Optional[str]) -> Optional[str]:
+    """Identifiant de fuseau IANA valide (ex. Africa/Douala), sinon erreur de saisie."""
+    if valeur is None:
+        return None
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(valeur)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(
+            "Fuseau horaire inconnu : indiquez un identifiant IANA, par exemple Africa/Douala."
+        ) from exc
+    return valeur
+
+# Poste de production d'un article du catalogue (écran cuisine, bar ou desserts).
+PosteProduction = Literal["KITCHEN", "BAR", "DESSERT"]
 
 
 class RestaurantBase(BaseModel):
@@ -48,11 +68,25 @@ class RestaurantUpdate(BaseModel):
     taux_service: Optional[Decimal] = Field(None, ge=0, le=100)
     config_jsonb: Optional[dict] = None
     is_active: Optional[bool] = None
+    timezone: Optional[str] = Field(
+        None,
+        max_length=64,
+        description="Fuseau IANA du restaurant (dates de réservation, rappels, horaires).",
+    )
+
+    @field_validator("timezone")
+    @classmethod
+    def _fuseau_valide(cls, valeur: Optional[str]) -> Optional[str]:
+        if valeur is None:
+            # Non fourni : pas de validation. Fourni à null : refusé (colonne obligatoire).
+            raise ValueError("Le fuseau horaire ne peut pas être vide.")
+        return _fuseau_iana(valeur)
 
 
 class RestaurantResponse(RestaurantBase):
     id: uuid.UUID
     user_id: uuid.UUID
+    timezone: str = FUSEAU_DEFAUT
     created_at: datetime
     updated_at: datetime
 
@@ -156,9 +190,18 @@ class StockComposantResponse(BaseModel):
 
 
 class StockMouvementCreate(BaseModel):
-    type: str = Field(..., pattern="^(entree|ajustement|perte)$")
-    quantite: Decimal = Field(..., gt=0)
-    notes: Optional[str] = None
+    """Mouvement manuel. ``entree`` = réception ; ``sortie`` ou ``perte`` = sortie hors vente (motif requis) ;
+    ``ajustement`` = nouvelle quantité constatée (motif requis). La précision (3 décimales) et les motifs
+    sont contrôlés par le moteur (``stock_engine``) qui répond en 422 avec un code français."""
+
+    type: str = Field(..., pattern="^(entree|sortie|perte|ajustement)$")
+    quantite: Decimal
+    motif: Optional[str] = Field(default=None, max_length=40)
+    notes: Optional[str] = Field(default=None, max_length=1000)
+    cout_unitaire: Optional[Decimal] = None
+    lot_numero: Optional[str] = Field(default=None, max_length=60)
+    date_peremption: Optional[date] = None
+    fournisseur_id: Optional[uuid.UUID] = None
 
 
 class StockSeuilUpdate(BaseModel):
@@ -174,6 +217,13 @@ class CombinaisonBase(BaseModel):
     devise: str = Field(default="XAF", max_length=3)
     disponible: bool = True
     menu_id: Optional[uuid.UUID] = None
+    # Sans poste indiqué, la combinaison part en cuisine.
+    station: Optional[PosteProduction] = Field(default=None, validate_default=True)
+
+    @field_validator("station", mode="before")
+    @classmethod
+    def _station_par_defaut(cls, value):
+        return "KITCHEN" if value is None else value
 
 
 class CombinaisonCreate(CombinaisonBase):
@@ -187,6 +237,14 @@ class CombinaisonUpdate(BaseModel):
     devise: Optional[str] = Field(None, max_length=3)
     disponible: Optional[bool] = None
     menu_id: Optional[uuid.UUID] = None
+    station: Optional[PosteProduction] = None
+
+    @field_validator("station", mode="before")
+    @classmethod
+    def _station_requis(cls, value):
+        if value is None:
+            raise ValueError("Le poste de production ne peut pas être vide.")
+        return value
     composant_ids: Optional[List[uuid.UUID]] = Field(None, min_length=1)
 
 
@@ -210,6 +268,13 @@ class PlatBase(BaseModel):
     photo_url: Optional[str] = None
     temps_preparation: Optional[int] = Field(None, ge=0)
     attributs_jsonb: Optional[dict] = None
+    # Sans poste indiqué, le plat part en cuisine.
+    station: Optional[PosteProduction] = Field(default=None, validate_default=True)
+
+    @field_validator("station", mode="before")
+    @classmethod
+    def _station_par_defaut(cls, value):
+        return "KITCHEN" if value is None else value
 
 
 class PlatCreate(PlatBase):
@@ -228,6 +293,14 @@ class PlatUpdate(BaseModel):
     temps_preparation: Optional[int] = Field(None, ge=0)
     attributs_jsonb: Optional[dict] = None
     category_id: Optional[uuid.UUID] = None
+    station: Optional[PosteProduction] = None
+
+    @field_validator("station", mode="before")
+    @classmethod
+    def _station_requis(cls, value):
+        if value is None:
+            raise ValueError("Le poste de production ne peut pas être vide.")
+        return value
     composant_ids: Optional[List[uuid.UUID]] = Field(None, min_length=0)
 
 
@@ -280,6 +353,13 @@ class BoissonBase(BaseModel):
     # bouteilles). Sans lien, la boisson ne consomme aucun stock.
     composant_id: Optional[uuid.UUID] = None
     stock_par_vente: Decimal = Field(default=1, gt=0)
+    # Sans poste indiqué, la boisson part au bar.
+    station: Optional[PosteProduction] = Field(default=None, validate_default=True)
+
+    @field_validator("station", mode="before")
+    @classmethod
+    def _station_par_defaut(cls, value):
+        return "BAR" if value is None else value
 
 
 class BoissonCreate(BoissonBase):
@@ -297,6 +377,14 @@ class BoissonUpdate(BaseModel):
     attributs_jsonb: Optional[dict] = None
     composant_id: Optional[uuid.UUID] = None
     stock_par_vente: Optional[Decimal] = Field(None, gt=0)
+    station: Optional[PosteProduction] = None
+
+    @field_validator("station", mode="before")
+    @classmethod
+    def _station_requis(cls, value):
+        if value is None:
+            raise ValueError("Le poste de production ne peut pas être vide.")
+        return value
 
 
 class BoissonResponse(BoissonBase):

@@ -6,8 +6,8 @@ Connexion : ``/v1/ros/ws/kds/{restaurant_id}/{station}`` avec ``station`` parmi
 ``KITCHEN``, ``BAR``, ``DESSERT`` ; jeton dans le sous-protocole
 (``new WebSocket(url, ["bearer", accessToken])``) ou l'en-tête Authorization.
 
-Le serveur pousse un message texte JSON à chaque création ou changement de statut d'un
-ticket de CETTE station, une fois la transaction validée :
+Le serveur pousse un message texte JSON à chaque création, changement de statut ou de
+priorité d'un ticket de CETTE station, une fois la transaction validée :
 
     {
       "event": "ticket.created" | "ticket.updated",
@@ -16,14 +16,16 @@ ticket de CETTE station, une fois la transaction validée :
       "station": "KITCHEN",
       "ticket": {
         "id": "<uuid>", "order_id": "<uuid>", "station": "KITCHEN",
-        "status": "QUEUED" | "IN_PREPARATION" | "READY" | "SERVED",
+        "status": "QUEUED" | "IN_PREPARATION" | "READY" | "SERVED" | "CANCELLED",
         "items_jsonb": [{"product_name": "...", "quantity": 1, "notes": null}],
-        "created_at": "...", "ready_at": null
+        "priority": 0, "course": null,
+        "created_at": "...", "started_at": null, "ready_at": null,
+        "served_at": null, "cancelled_at": null
       }
     }
 
-Le message est autosuffisant (pas de relecture nécessaire). Le client peut envoyer
-``ping`` : le serveur répond ``pong`` (le délai d'inactivité des proxys est ainsi tenable).
+Le message est autosuffisant (pas de relecture nécessaire). Le client envoie ``ping``
+toutes les 25 secondes : le serveur répond ``pong``. Tout autre message est ignoré.
 Un ticket annulé par un rollback n'est jamais diffusé.
 """
 
@@ -43,7 +45,7 @@ _QUEUE_KEY = "kds_events"
 
 class KdsConnectionManager:
     def __init__(self):
-        # Maps (restaurant_id, station) -> List[WebSocket]
+        # Maps "restaurant_id:station" -> List[WebSocket]
         self.active_connections: Dict[str, List[WebSocket]] = {}
 
     async def connect(
@@ -55,30 +57,31 @@ class KdsConnectionManager:
     ):
         await websocket.accept(subprotocol=subprotocol)
         key = f"{restaurant_id}:{station}"
-        if key not in self.active_connections:
-            self.active_connections[key] = []
-        self.active_connections[key].append(websocket)
+        self.active_connections.setdefault(key, []).append(websocket)
 
     def disconnect(self, websocket: WebSocket, restaurant_id: str, station: str):
         key = f"{restaurant_id}:{station}"
-        if key in self.active_connections:
-            if websocket in self.active_connections[key]:
-                self.active_connections[key].remove(websocket)
-            if not self.active_connections[key]:
-                del self.active_connections[key]
+        connections = self.active_connections.get(key)
+        if connections is None:
+            return
+        if websocket in connections:
+            connections.remove(websocket)
+        if not connections:
+            del self.active_connections[key]
 
     async def broadcast_ticket_event(
         self, restaurant_id: str, station: str, event_data: dict
     ):
         key = f"{restaurant_id}:{station}"
-        if key in self.active_connections:
-            message = json.dumps(event_data, default=str)
-            for connection in list(self.active_connections[key]):
-                try:
-                    await connection.send_text(message)
-                except Exception:
-                    # Connexion morte : on la retire pour ne plus lui écrire.
-                    self.disconnect(connection, restaurant_id, station)
+        if key not in self.active_connections:
+            return
+        message = json.dumps(event_data, default=str)
+        for connection in list(self.active_connections.get(key, [])):
+            try:
+                await connection.send_text(message)
+            except Exception:
+                # Connexion morte : on la retire pour ne plus lui écrire.
+                self.disconnect(connection, restaurant_id, station)
 
 
 kds_manager = KdsConnectionManager()
@@ -100,8 +103,13 @@ def _payload(ticket: ProductionTicket) -> Dict[str, Any]:
         "station": _plain(ticket.station),
         "status": _plain(ticket.status),
         "items_jsonb": ticket.items_jsonb,
+        "priority": state.get("priority") or 0,
+        "course": state.get("course"),
         "created_at": state.get("created_at") or datetime.now(timezone.utc),
+        "started_at": state.get("started_at"),
         "ready_at": state.get("ready_at"),
+        "served_at": state.get("served_at"),
+        "cancelled_at": state.get("cancelled_at"),
     }
 
 
@@ -131,7 +139,8 @@ def _ticket_inserted(mapper, connection, target):
 
 @event.listens_for(ProductionTicket, "after_update")
 def _ticket_updated(mapper, connection, target):
-    if sa_inspect(target).attrs.status.history.has_changes():
+    state = sa_inspect(target)
+    if state.attrs.status.history.has_changes() or state.attrs.priority.history.has_changes():
         _queue(target, "ticket.updated")
 
 

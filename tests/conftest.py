@@ -37,6 +37,7 @@ TEST_ENV = {
     "SKIP_DB_INIT": "true",
     "DEBUG": "false",
     "ENVIRONMENT": "test",
+    "EMAIL_BACKEND": "memory",
     "ALLOW_ORIGINS": "http://localhost:8000",
     "ALLOW_METHODS": "GET,POST,PUT,PATCH,DELETE",
     "ALLOW_HEADERS": "Content-Type,Authorization,X-Tenant-ID,X-Signature",

@@ -1,7 +1,8 @@
+from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, or_
 from app.repositories.base import BaseRepository
 from app.models.ros import (
     RosCustomer,
@@ -109,24 +110,106 @@ class RosOrderRepository(BaseRepository[RosOrder]):
 
 
 class ProductionTicketRepository(BaseRepository[ProductionTicket]):
+    OPEN = (TicketStatus.QUEUED.value, TicketStatus.IN_PREPARATION.value)
+
     def __init__(self, db: Session):
         super().__init__(ProductionTicket, db)
 
-    def get_pending_by_station(
-        self, restaurant_id: UUID, station: str, skip: int = 0, limit: int = 100
+    def get_for_update(self, ticket_id: UUID) -> Optional[ProductionTicket]:
+        """Ticket verrouillé jusqu'à la fin de la transaction : deux écrans qui
+        cliquent en même temps ne peuvent pas se doubler (le second lit l'état
+        déjà changé et reçoit un 409)."""
+        return (
+            self.db.query(ProductionTicket)
+            .filter(ProductionTicket.id == ticket_id)
+            .with_for_update()
+            .populate_existing()
+            .first()
+        )
+
+    def get_board(
+        self,
+        restaurant_id: UUID,
+        station: str,
+        *,
+        window_start: datetime,
+        ready_since: datetime,
+        served_since: datetime,
+        limit: int = 500,
     ) -> List[ProductionTicket]:
+        """Tickets affichés sur l'écran d'un poste : à faire et en préparation créés
+        dans la fenêtre, « Prêt » récents, et « Servi » encore rappelables. Tri : priorité,
+        puis ancienneté."""
         return (
             self.db.query(ProductionTicket)
             .filter(
                 ProductionTicket.restaurant_id == restaurant_id,
                 ProductionTicket.station == station,
-                ProductionTicket.status.in_(
-                    [TicketStatus.QUEUED.value, TicketStatus.IN_PREPARATION.value]
+                or_(
+                    and_(
+                        ProductionTicket.status.in_(self.OPEN),
+                        ProductionTicket.created_at >= window_start,
+                    ),
+                    and_(
+                        ProductionTicket.status == TicketStatus.READY.value,
+                        ProductionTicket.ready_at >= ready_since,
+                    ),
+                    and_(
+                        ProductionTicket.status == TicketStatus.SERVED.value,
+                        ProductionTicket.served_at >= served_since,
+                    ),
                 ),
             )
-            .order_by(ProductionTicket.created_at.asc(), ProductionTicket.id)
-            .offset(skip)
+            .order_by(
+                ProductionTicket.priority.desc(),
+                ProductionTicket.created_at.asc(),
+                ProductionTicket.id,
+            )
             .limit(limit)
+            .all()
+        )
+
+    def open_in_window(
+        self, restaurant_id: UUID, station: str, window_start: datetime
+    ) -> List[ProductionTicket]:
+        """Tickets encore à faire, créés dans la fenêtre (base de la vue « tout le service »)."""
+        return (
+            self.db.query(ProductionTicket)
+            .filter(
+                ProductionTicket.restaurant_id == restaurant_id,
+                ProductionTicket.station == station,
+                ProductionTicket.status.in_(self.OPEN),
+                ProductionTicket.created_at >= window_start,
+            )
+            .limit(5000)
+            .all()
+        )
+
+    def open_older_than(
+        self, restaurant_id: UUID, window_start: datetime
+    ) -> List[ProductionTicket]:
+        """Tickets encore à faire créés avant la fenêtre : ce sont des tickets périmés."""
+        return (
+            self.db.query(ProductionTicket)
+            .filter(
+                ProductionTicket.restaurant_id == restaurant_id,
+                ProductionTicket.status.in_(self.OPEN),
+                ProductionTicket.created_at < window_start,
+            )
+            .with_for_update()
+            .all()
+        )
+
+    def open_for_session(self, session_id: UUID) -> List[ProductionTicket]:
+        """Tickets encore à faire des commandes d'une session."""
+        return (
+            self.db.query(ProductionTicket)
+            .join(RosOrder, RosOrder.id == ProductionTicket.order_id)
+            .filter(
+                RosOrder.session_id == session_id,
+                ProductionTicket.status.in_(self.OPEN),
+            )
+            .with_for_update(of=ProductionTicket)
             .all()
         )
 

@@ -581,10 +581,9 @@ def add_stock_movement(
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    try:
-        return StockService(db).add_movement(composant_id, movement_data)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    # Erreurs métier (StockError, InsufficientStockError) : rendues par le gestionnaire de problèmes,
+    # avec un code stable et un message français.
+    return StockService(db).add_movement(composant_id, movement_data)
 
 
 @router.put(
@@ -1174,6 +1173,28 @@ def get_table(table_id: uuid.UUID, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND, detail="Table not found"
         )
     return table
+
+
+@router.delete(
+    "/tables/{table_id}",
+    dependencies=[Depends(perm.MANAGEMENT)],
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["restaurant-tables"],
+    summary="Supprimer une table",
+    description="""
+    Suppression logique d'une table (gérant ou propriétaire) : elle disparaît du plan de salle et son
+    numéro redevient disponible. Refusée (409) tant qu'une session est ouverte sur la table.
+    """,
+    responses={
+        204: {"description": "Table supprimée."},
+        404: {"description": "Table introuvable."},
+        409: {"description": "Table occupée."},
+    },
+)
+def delete_table(table_id: uuid.UUID, db: Session = Depends(get_db)):
+    if not TableService(db).delete_table(table_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Table not found")
+    return None
 
 
 @router.put(

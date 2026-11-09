@@ -401,12 +401,17 @@ class TestReservations:
 
         assert client.get(f"/v1/reservations/{res_id}", headers=h).json()["id"] == res_id
         assert [r["id"] for r in client.get(f"/v1/reservations/restaurants/{rid}/reservations", headers=h).json()] == [res_id]
-        updated = client.put(f"/v1/reservations/{res_id}", headers=h, json={"party_size": 5})
-        assert updated.status_code == 200 and updated.json()["party_size"] == 5
+        # 5 couverts sur une table de 4 : refusé par la garde de capacité (409) ; 4 passe.
+        too_big = client.put(f"/v1/reservations/{res_id}", headers=h, json={"party_size": 5})
+        assert too_big.status_code == 409
+        updated = client.put(f"/v1/reservations/{res_id}", headers=h, json={"party_size": 4})
+        assert updated.status_code == 200 and updated.json()["party_size"] == 4
         assert client.post(f"/v1/reservations/{res_id}/confirm", headers=h, json={"notes": "Confirmée"}).json()["status"] == "confirmed"
         assert client.post(f"/v1/reservations/{res_id}/check-in", headers=h).json()["status"] == "checked_in"
+        # Une réservation arrivée ne s'annule plus : c'est une transition interdite (409).
         cancelled = client.post(f"/v1/reservations/{res_id}/cancel", headers=h, json={"reason": "Imprévu"})
-        assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
+        assert cancelled.status_code == 409
+        assert client.post(f"/v1/reservations/{res_id}/complete", headers=h).json()["status"] == "completed"
         assert client.delete(f"/v1/reservations/{res_id}", headers=h).status_code == 204
         assert client.get(f"/v1/reservations/{res_id}", headers=h).status_code == 404
 
@@ -433,7 +438,10 @@ class TestReservations:
         assert first.status_code == second.status_code == 201, (first.text, second.text)
         assert (first.json()["position"], second.json()["position"]) == (1, 2)
         assert [e["customer_name"] for e in client.get(f"/v1/reservations/restaurants/{rid}/waitlist", headers=h).json()] == ["A", "B"]
-        seated = client.post(f"/v1/reservations/waitlist/{first.json()['id']}/seat", headers=h)
+        # Installer exige une table libre choisie : sans table, refusé (422).
+        assert client.post(f"/v1/reservations/waitlist/{first.json()['id']}/seat", headers=h).status_code == 422
+        table = client.post(f"/v1/restaurants/{rid}/tables", headers=h, json={"numero": "W1", "capacite": 4}).json()["id"]
+        seated = client.post(f"/v1/reservations/waitlist/{first.json()['id']}/seat", headers=h, params={"table_id": table})
         assert seated.status_code == 200 and seated.json()["status"] == "SEATED"
         assert client.delete(f"/v1/reservations/waitlist/{second.json()['id']}", headers=h, params={"reason": "parti"}).status_code == 204
 
@@ -660,10 +668,12 @@ class TestRestaurantRoutes:
         sauce = client.post(
             f"/v1/restaurants/{rid}/composants", headers=h, json={"nom": "Sauce S", "type": "sauce", "prix_supplement": 200}
         ).json()["id"]
-        for kind, qty in (("entree", 50), ("perte", 2), ("ajustement", 40)):
+        for kind, qty, motif in (("entree", 50, None), ("perte", 2, "perte"), ("ajustement", 40, "inventaire")):
             no_server_error(
                 client.post(
-                    f"/v1/restaurants/composants/{riz}/stock/mouvements", headers=h, json={"type": kind, "quantite": qty}
+                    f"/v1/restaurants/composants/{riz}/stock/mouvements",
+                    headers=h,
+                    json={"type": kind, "quantite": qty, **({"motif": motif} if motif else {})},
                 ),
                 200,
                 201,

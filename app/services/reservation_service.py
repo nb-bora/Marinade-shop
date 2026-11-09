@@ -1,591 +1,634 @@
-from typing import Optional, List
-from datetime import datetime, timedelta, timezone, date, time
-from decimal import Decimal
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func
+"""Réservations et liste d'attente : règles métier, verrous et effets sur les tables.
 
-from app.models.reservation import (
-    Reservation,
-    ReservationGuest,
-    WaitlistEntry,
-)
-from app.models.restaurant import Table
-from app.models.ros import RosCustomer, ServiceSession
-from app.repositories.base import BaseRepository
-from app.repositories.restaurant_repository import (
-    RestaurantRepository,
-    TableRepository,
-)
-from app.repositories.ros_repository import (
-    RosCustomerRepository,
-    ServiceSessionRepository,
-)
+Règles principales (voir aussi ``reservation_states`` et ``availability_service``) :
+
+- transitions d'état gardées (409) ;
+- anti-chevauchement sur une table, vérifié sous verrou de la ligne ``tables`` ;
+- garde de capacité, de date passée et d'horaires d'ouverture, levée seulement par la
+  gestion (``forcer=True``) ;
+- occupation des tables : confirmation -> ``reservee``, arrivée -> ``occupee`` + session de
+  salle, annulation ou absence -> ``libre`` si rien d'autre ne suit dans les 4 heures ;
+- liste d'attente : position attribuée sous verrou du restaurant, renumérotation à chaque
+  sortie dans la même transaction.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+from sqlalchemy import func, or_
+from sqlalchemy.orm import Session
+
+from app.models.reservation import Reservation, ReservationGuest, WaitlistEntry
+from app.models.restaurant import Restaurant, Table
+from app.models.ros import RosCustomer, RosOrder
 from app.schemas.reservation import (
     ReservationCreate,
-    ReservationListFilters,
+    ReservationGuestCreate,
     WaitlistCreate,
 )
-from app.utils.enums import ReservationStatus, TableStatut
+from app.schemas.ros import SessionCreate
+from app.services import availability_service as av
+from app.services import email_templates, restaurant_emails
+from app.services.reservation_states import TERMINALES, verifier_transition
+from app.services.ros_service import RosService
+from app.utils.enums import ReservationStatus as S
+from app.utils.enums import TableStatut
 from app.utils.exceptions import (
-    BusinessLogicError,
+    ConflictError,
+    MarinadeException,
     NotFoundError,
     ValidationError,
 )
 from app.utils.logging import get_logger
-import uuid
 
 logger = get_logger(__name__)
 
-
-def _combine_date_heure(d: date, heure: str) -> datetime:
-    try:
-        parts = heure.split(":")
-        hh = int(parts[0])
-        mm = int(parts[1]) if len(parts) > 1 else 0
-    except Exception as exc:
-        raise ValidationError(f"Invalid heure_reservation '{heure}': {exc}")
-    t = time(hh, mm)
-    naive = datetime.combine(d, t)
-    if naive.tzinfo is None:
-        naive = naive.replace(tzinfo=timezone.utc)
-    return naive
+TOLERANCE_RETARD_MIN = 5
+FENETRE_LIBERATION_H = 4
+ATTENTE_STATUTS = ("WAITING", "SEATED", "REMOVED", "EXPIRED", "CANCELLED")
+DECALAGE_RENUMEROTATION = 1_000_000
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+class RegleReservation(MarinadeException):
+    """Refus d'une règle de réservation (date, horaires, données) : HTTP 422."""
+
+    default_code = "reservation.regle"
+    http_status = 422
 
 
-def _normalize(s: Optional[str]) -> Optional[str]:
-    if s is None:
-        return None
-    s = s.strip()
-    return s or None
+def _conflit_details(res: Reservation, zone) -> Dict[str, Any]:
+    return {
+        "reservation_id": str(res.id),
+        "customer_name": res.customer_name,
+        "heure": av.libelle_heure(res.reservation_date, zone),
+        "party_size": res.party_size,
+    }
 
 
-class ReservationRepository(BaseRepository[Reservation]):
-    def __init__(self, db: Session):
-        super().__init__(Reservation, db)
-
-    def create_with_guests(
-        self,
-        reservation_data: dict,
-        guests: Optional[List[dict]] = None,
-    ) -> Reservation:
-        reservation = Reservation(**reservation_data)
-        self.db.add(reservation)
-        self.db.flush()
-        self.db.refresh(reservation)
-        if guests:
-            for guest in guests:
-                g = ReservationGuest(
-                    reservation_id=reservation.id,
-                    name=guest.get("name") or guest.get("nom"),
-                    age_category=guest.get("age_category")
-                    or (str(guest["age"]) if guest.get("age") is not None else None),
-                    is_vegetarian=bool(guest.get("is_vegetarian", False)),
-                    allergenes=guest.get("allergenes") or guest.get("preferences"),
-                    notes=guest.get("notes"),
-                )
-                self.db.add(g)
-            self.db.flush()
-            self.db.refresh(reservation)
-        return reservation
-
-    def list_active_for_table_range(
-        self,
-        table_id: uuid.UUID,
-        start: datetime,
-        end: datetime,
-        exclude_reservation_id: Optional[uuid.UUID] = None,
-    ) -> List[Reservation]:
-        q = self.db.query(Reservation).filter(
-            Reservation.deleted_at.is_(None),
-            Reservation.table_id == table_id,
-            Reservation.status.notin_(
-                [ReservationStatus.CANCELLED.value, ReservationStatus.NO_SHOW.value]
-            ),
-            Reservation.reservation_date < end,
-            func.timezone("UTC", Reservation.reservation_date)
-            + (Reservation.duration_minutes * func.cast("1 minute", func.interval))
-            > start,
-        )
-        if exclude_reservation_id is not None:
-            q = q.filter(Reservation.id != exclude_reservation_id)
-        return q.all()
-
-    def list_for_restaurant(
-        self,
-        restaurant_id: uuid.UUID,
-        filters: Optional[ReservationListFilters] = None,
-    ) -> List[Reservation]:
-        q = self.db.query(Reservation).filter(
-            Reservation.restaurant_id == restaurant_id,
-            Reservation.deleted_at.is_(None),
-        )
-        if filters:
-            if filters.date_debut is not None:
-                start_of_day = datetime.combine(
-                    filters.date_debut, time.min, tzinfo=timezone.utc
-                )
-                q = q.filter(Reservation.reservation_date >= start_of_day)
-            if filters.date_fin is not None:
-                end_of_day = datetime.combine(
-                    filters.date_fin, time.max, tzinfo=timezone.utc
-                )
-                q = q.filter(Reservation.reservation_date <= end_of_day)
-            if filters.statut:
-                q = q.filter(Reservation.status == filters.statut)
-            if filters.table_id:
-                q = q.filter(Reservation.table_id == filters.table_id)
-            if filters.nom_client:
-                pattern = f"%{filters.nom_client.strip().lower()}%"
-                q = q.filter(func.lower(Reservation.customer_name).like(pattern))
-            if filters.phone_client:
-                pattern = f"%{filters.phone_client.strip()}%"
-                q = q.filter(Reservation.customer_phone.like(pattern))
-        return q.order_by(Reservation.reservation_date.desc()).all()
+def _description_conflit(res: Reservation, zone) -> str:
+    return (
+        f"{res.customer_name}, {res.party_size} couvert(s), à "
+        f"{av.libelle_heure(res.reservation_date, zone)}"
+    )
 
 
-class ReservationGuestRepository(BaseRepository[ReservationGuest]):
-    def __init__(self, db: Session):
-        super().__init__(ReservationGuest, db)
-
-    def list_by_reservation(self, reservation_id: uuid.UUID) -> List[ReservationGuest]:
-        return (
-            self.db.query(ReservationGuest)
-            .filter(ReservationGuest.reservation_id == reservation_id)
-            .all()
-        )
+def _contexte_session(table: Optional[Table], couverts: int) -> str:
+    base = f"{couverts} couvert" + ("s" if couverts > 1 else "")
+    return f"{base} · {table.emplacement}" if table is not None and table.emplacement else base
 
 
-class WaitlistEntryRepository(BaseRepository[WaitlistEntry]):
-    def __init__(self, db: Session):
-        super().__init__(WaitlistEntry, db)
+def _restaurant(db: Session, restaurant_id: uuid.UUID) -> Restaurant:
+    restaurant = db.get(Restaurant, restaurant_id)
+    if restaurant is None:
+        raise NotFoundError("Restaurant introuvable")
+    return restaurant
 
-    def max_position(self, restaurant_id: uuid.UUID) -> int:
-        result = (
-            self.db.query(func.max(WaitlistEntry.position))
-            .filter(
-                WaitlistEntry.restaurant_id == restaurant_id,
-                WaitlistEntry.status == "WAITING",
-            )
-            .scalar()
-        )
-        return int(result or 0)
 
-    def list_waiting(self, restaurant_id: uuid.UUID) -> List[WaitlistEntry]:
-        return (
-            self.db.query(WaitlistEntry)
-            .filter(
-                WaitlistEntry.restaurant_id == restaurant_id,
-                WaitlistEntry.status == "WAITING",
-            )
-            .order_by(WaitlistEntry.position.asc(), WaitlistEntry.joined_at.asc())
-            .all()
-        )
-
-    def decrement_positions_after(
-        self, restaurant_id: uuid.UUID, from_position: int
-    ) -> None:
-        entries = (
-            self.db.query(WaitlistEntry)
-            .filter(
-                WaitlistEntry.restaurant_id == restaurant_id,
-                WaitlistEntry.status == "WAITING",
-                WaitlistEntry.position > from_position,
-            )
-            .order_by(WaitlistEntry.position.asc())
-            .all()
-        )
-        for entry in entries:
-            entry.position = entry.position - 1
-        self.db.flush()
-
-    def find_next_waiting(
-        self, restaurant_id: uuid.UUID, expire_minutes: int = 60
-    ) -> Optional[WaitlistEntry]:
-        threshold = _utc_now() - timedelta(minutes=expire_minutes)
-        return (
-            self.db.query(WaitlistEntry)
-            .filter(
-                WaitlistEntry.restaurant_id == restaurant_id,
-                WaitlistEntry.status == "WAITING",
-                WaitlistEntry.joined_at >= threshold,
-            )
-            .order_by(WaitlistEntry.position.asc(), WaitlistEntry.joined_at.asc())
-            .first()
-        )
+def ensure_refs_du_restaurant(
+    db: Session,
+    restaurant_id: uuid.UUID,
+    *,
+    table_ids: Tuple[Optional[uuid.UUID], ...] = (),
+    customer_id: Optional[uuid.UUID] = None,
+) -> None:
+    """Un identifiant venu du corps de requête doit appartenir au restaurant (400 sinon)."""
+    for table_id in table_ids:
+        if table_id is None:
+            continue
+        table = db.get(Table, table_id)
+        if table is None or table.restaurant_id != restaurant_id or table.deleted_at is not None:
+            raise ValidationError("Table invalide pour ce restaurant")
+    if customer_id is not None:
+        customer = db.get(RosCustomer, customer_id)
+        if customer is None or customer.restaurant_id != restaurant_id:
+            raise ValidationError("Client invalide pour ce restaurant")
 
 
 class ReservationService:
     def __init__(self, db: Session):
         self.db = db
-        self.reservation_repo = ReservationRepository(db)
-        self.guest_repo = ReservationGuestRepository(db)
-        self.restaurant_repo = RestaurantRepository(db)
-        self.table_repo = TableRepository(db)
-        self.customer_repo = RosCustomerRepository(db)
-        self.session_repo = ServiceSessionRepository(db)
 
-    def check_table_availability(
-        self,
-        table_id: uuid.UUID,
-        reservation_date: datetime,
-        duration_minutes: int,
-        exclude_reservation_id: Optional[uuid.UUID] = None,
-    ) -> bool:
-        if duration_minutes <= 0:
-            raise ValidationError("duration_minutes must be positive")
-        if reservation_date.tzinfo is None:
-            reservation_date = reservation_date.replace(tzinfo=timezone.utc)
-        start = reservation_date
-        end = reservation_date + timedelta(minutes=duration_minutes)
-        conflicts = self.reservation_repo.list_active_for_table_range(
-            table_id, start, end, exclude_reservation_id=exclude_reservation_id
+    # ------------------------------------------------------------------ lecture
+    def charger(self, reservation_id: uuid.UUID) -> Reservation:
+        reservation = (
+            self.db.query(Reservation)
+            .filter(Reservation.id == reservation_id, Reservation.deleted_at.is_(None))
+            .one_or_none()
         )
-        return len(conflicts) == 0
+        if reservation is None:
+            raise NotFoundError("Réservation introuvable")
+        return reservation
 
-    def create_reservation(
+    # ------------------------------------------------------------------ garde
+    def _verifier_creneau(
+        self,
+        restaurant: Restaurant,
+        debut: datetime,
+        duree: int,
+        couverts: int,
+        table: Optional[Table],
+        *,
+        forcer: bool,
+        exclue: Optional[uuid.UUID],
+        controle_date: bool,
+        controle_capacite: bool,
+    ) -> None:
+        zone = av.fuseau_de(restaurant)
+        if controle_date and not forcer:
+            if debut < av.maintenant() - timedelta(minutes=TOLERANCE_RETARD_MIN):
+                raise RegleReservation(
+                    "La date est passée. Seule la gestion peut enregistrer une réservation dans le passé."
+                )
+            if not av.dans_horaires(restaurant, debut):
+                raise RegleReservation(
+                    "Ce créneau est hors des horaires d'ouverture. "
+                    "Seule la gestion peut le forcer."
+                )
+        if table is None:
+            return
+        if controle_capacite and table.capacite < couverts and not forcer:
+            raise ConflictError(
+                f"La table {table.numero} accueille {table.capacite} personne(s) : "
+                f"{couverts} couverts dépassent la capacité. Seule la gestion peut forcer."
+            )
+        conflits = av.reservations_actives_sur_table(
+            self.db, table.id, debut, duree, exclue=exclue
+        )
+        if conflits:
+            premier = conflits[0]
+            raise ConflictError(
+                f"La table {table.numero} est déjà réservée : {_description_conflit(premier, zone)}.",
+                details=_conflit_details(premier, zone),
+            )
+
+    # ------------------------------------------------------------------ tables
+    def _reserver_table(self, table_id: Optional[uuid.UUID]) -> None:
+        table = av.lock_table(self.db, table_id) if table_id else None
+        if table is not None and table.statut == TableStatut.LIBRE.value:
+            table.statut = TableStatut.RESERVEE.value
+
+    def _liberer_table_si_libre(self, table_id: Optional[uuid.UUID], res: Reservation) -> None:
+        """Remet la table en « libre » seulement si elle était réservée pour ``res`` et que
+        rien d'autre active ne la prend dans les 4 heures qui viennent."""
+        if table_id is None:
+            return
+        table = av.lock_table(self.db, table_id)
+        if table is None or table.statut != TableStatut.RESERVEE.value:
+            return
+        suivantes = av.reservations_actives_sur_table(
+            self.db,
+            table.id,
+            av.maintenant(),
+            FENETRE_LIBERATION_H * 60,
+            exclue=res.id,
+        )
+        if not suivantes:
+            table.statut = TableStatut.LIBRE.value
+
+    # ------------------------------------------------------------------ création
+    def create(
         self,
         restaurant_id: uuid.UUID,
         data: ReservationCreate,
-        created_by: Optional[uuid.UUID] = None,
+        *,
+        user_id: uuid.UUID,
+        forcer: bool,
     ) -> Reservation:
-        if not self.restaurant_repo.get(str(restaurant_id)):
-            raise NotFoundError("Restaurant not found")
-        if data.nombre_personnes <= 0:
-            raise ValidationError("Party size must be positive")
-        reservation_date = _combine_date_heure(
-            data.date_reservation, data.heure_reservation
+        restaurant = _restaurant(self.db, restaurant_id)
+        ensure_refs_du_restaurant(
+            self.db,
+            restaurant_id,
+            table_ids=(data.table_id,),
+            customer_id=data.customer_id,
         )
-        duration = 90
-        duration_minutes = getattr(data, "duration_minutes", None)
-        if isinstance(duration_minutes, int) and duration_minutes > 0:
-            duration = duration_minutes
-
-        table = None
-        if data.table_id is not None:
-            table = self.table_repo.get(str(data.table_id))
-            if not table or table.restaurant_id != restaurant_id:
-                raise ValidationError("Invalid table for this restaurant")
-            if table.statut == TableStatut.MAINTENANCE.value:
-                raise BusinessLogicError("Table is under maintenance")
-            if not self.check_table_availability(
-                data.table_id, reservation_date, duration
-            ):
-                raise BusinessLogicError("Table not available at this time")
-
-        reservation_data = {
-            "restaurant_id": restaurant_id,
-            "table_id": data.table_id,
-            "customer_name": data.nom_client.strip(),
-            "customer_phone": _normalize(data.phone_client),
-            "customer_email": _normalize(data.email_client),
-            "status": ReservationStatus.PENDING.value,
-            "party_size": data.nombre_personnes,
-            "reservation_date": reservation_date,
-            "duration_minutes": duration,
-            "notes": _normalize(data.notes),
-            "source": _normalize(data.source) or "POS",
-            "preferences_jsonb": data.preferences or data.metadata_jsonb,
-            "created_by": created_by,
-        }
-        depot = getattr(data, "depot_garantie", None)
-        if depot is not None and reservation_data["preferences_jsonb"] is None:
-            reservation_data["preferences_jsonb"] = {}
-        if depot is not None:
-            reservation_data["preferences_jsonb"] = (
-                reservation_data["preferences_jsonb"] or {}
-            )
-            reservation_data["preferences_jsonb"]["depot_garantie"] = str(depot)
-
-        guest_data = []
-        invites = getattr(data, "invites", None) or []
-        for inv in invites:
-            if hasattr(inv, "model_dump"):
-                guest_data.append(inv.model_dump())
-            elif isinstance(inv, dict):
-                guest_data.append(inv)
-
-        reservation = self.reservation_repo.create_with_guests(
-            reservation_data, guests=guest_data
+        table = av.lock_table(self.db, data.table_id) if data.table_id else None
+        self._verifier_creneau(
+            restaurant,
+            data.reservation_date,
+            data.duration_minutes,
+            data.party_size,
+            table,
+            forcer=forcer,
+            exclue=None,
+            controle_date=True,
+            controle_capacite=True,
         )
-
-        if (
-            data.table_id is not None
-            and reservation.status == ReservationStatus.CONFIRMED.value
-        ):
-            if table and table.statut == TableStatut.LIBRE.value:
-                self.table_repo.update(table, {"statut": TableStatut.RESERVEE.value})
-
-        logger.info(
-            f"Reservation created: {reservation.id} for restaurant {restaurant_id} "
-            f"table={data.table_id} party_size={data.nombre_personnes}"
+        reservation = Reservation(
+            restaurant_id=restaurant_id,
+            table_id=data.table_id,
+            customer_id=data.customer_id,
+            created_by=user_id,
+            customer_name=data.customer_name,
+            customer_phone=data.customer_phone,
+            customer_email=data.customer_email,
+            status=S.PENDING.value,
+            party_size=data.party_size,
+            reservation_date=data.reservation_date,
+            duration_minutes=data.duration_minutes,
+            notes=data.notes,
+            source=data.source,
+            reminder_sent=data.reminder_sent,
+            arrival_notes=data.arrival_notes,
+            preferences_jsonb=data.preferences_jsonb,
         )
-        return reservation
-
-    def confirm_reservation(
-        self,
-        reservation_id: uuid.UUID,
-        confirmed_by: Optional[uuid.UUID] = None,
-    ) -> Reservation:
-        reservation = self.reservation_repo.get(str(reservation_id))
-        if not reservation:
-            raise NotFoundError("Reservation not found")
-        if reservation.status in {
-            ReservationStatus.CANCELLED.value,
-            ReservationStatus.NO_SHOW.value,
-        }:
-            raise BusinessLogicError(
-                f"Cannot confirm reservation with status '{reservation.status}'"
-            )
-        reservation.status = ReservationStatus.CONFIRMED.value
-        reservation.confirmed_at = _utc_now()
-        if confirmed_by is not None:
-            if reservation.preferences_jsonb is None:
-                reservation.preferences_jsonb = {}
-            reservation.preferences_jsonb = {
-                **reservation.preferences_jsonb,
-                "confirmed_by": str(confirmed_by),
-            }
-        if reservation.table_id is not None:
-            table = self.table_repo.get(str(reservation.table_id))
-            if table and table.statut == TableStatut.LIBRE.value:
-                self.table_repo.update(table, {"statut": TableStatut.RESERVEE.value})
+        self.db.add(reservation)
+        self.db.flush()
+        self._creer_invites(reservation.id, data.invites)
         self.db.flush()
         self.db.refresh(reservation)
-        logger.info(f"Reservation confirmed: {reservation_id} by {confirmed_by}")
+        restaurant_emails.notify_reservation(self.db, reservation, "pending")
         return reservation
 
-    def check_in_reservation(
-        self,
-        reservation_id: uuid.UUID,
+    def _creer_invites(self, reservation_id: uuid.UUID, invites: List[ReservationGuestCreate]) -> None:
+        for invite in invites:
+            self.db.add(
+                ReservationGuest(
+                    reservation_id=reservation_id,
+                    name=invite.name,
+                    age_category=invite.age_category,
+                    is_vegetarian=invite.is_vegetarian,
+                    allergenes=invite.allergenes,
+                    notes=invite.notes,
+                )
+            )
+
+    # ------------------------------------------------------------------ modification
+    def update(
+        self, reservation: Reservation, changes: Dict[str, Any], *, forcer: bool
     ) -> Reservation:
-        reservation = self.reservation_repo.get(str(reservation_id))
-        if not reservation:
-            raise NotFoundError("Reservation not found")
-        if reservation.status in {
-            ReservationStatus.CANCELLED.value,
-            ReservationStatus.NO_SHOW.value,
-            ReservationStatus.COMPLETED.value,
-        }:
-            raise BusinessLogicError(
-                f"Cannot check-in reservation with status '{reservation.status}'"
+        if reservation.status in TERMINALES:
+            raise ConflictError(
+                "Une réservation terminée, annulée ou absente ne se modifie plus."
+            )
+        restaurant = _restaurant(self.db, reservation.restaurant_id)
+        ensure_refs_du_restaurant(
+            self.db,
+            reservation.restaurant_id,
+            table_ids=(changes.get("table_id"),),
+            customer_id=changes.get("customer_id"),
+        )
+        date_change = "reservation_date" in changes
+        duree_change = "duration_minutes" in changes
+        table_change = "table_id" in changes
+        party_change = "party_size" in changes
+        if reservation.status == S.CHECKED_IN.value and (date_change or duree_change or table_change):
+            raise ConflictError(
+                "Une réservation arrivée ne peut plus changer de date, de durée ni de table."
             )
 
-        reservation.status = ReservationStatus.CHECKED_IN.value
-        reservation.checked_in_at = _utc_now()
+        nouvelle_table_id = changes["table_id"] if table_change else reservation.table_id
+        ancienne_table_id = reservation.table_id
+        debut = changes.get("reservation_date", reservation.reservation_date)
+        duree = changes.get("duration_minutes", reservation.duration_minutes)
+        couverts = changes.get("party_size", reservation.party_size)
 
-        customer = None
-        if reservation.customer_id is not None:
-            customer = self.customer_repo.get(str(reservation.customer_id))
-        if customer is None:
-            customer_data = {
-                "restaurant_id": reservation.restaurant_id,
-                "name": reservation.customer_name,
-                "phone": reservation.customer_phone,
-                "email": reservation.customer_email,
-                "preferences_jsonb": reservation.preferences_jsonb,
-            }
-            customer = self.customer_repo.create(customer_data)
-            reservation.customer_id = customer.id
-
-        session = None
-        if reservation.session_id is not None:
-            session = self.session_repo.get(str(reservation.session_id))
-        if session is None and reservation.table_id is not None:
-            existing = self.session_repo.get_session_by_table(
-                reservation.restaurant_id, reservation.table_id
+        if date_change or duree_change or table_change or party_change:
+            table = av.lock_table(self.db, nouvelle_table_id) if nouvelle_table_id else None
+            self._verifier_creneau(
+                restaurant,
+                debut,
+                duree,
+                couverts,
+                table,
+                forcer=forcer,
+                exclue=reservation.id,
+                controle_date=date_change,
+                controle_capacite=party_change or table_change,
             )
-            if existing:
-                session = existing
-            else:
-                session_data = {
-                    "restaurant_id": reservation.restaurant_id,
-                    "customer_id": customer.id,
-                    "table_id": reservation.table_id,
-                }
-                session = self.session_repo.create(session_data)
-            reservation.session_id = session.id
 
-        if reservation.table_id is not None:
-            table = self.table_repo.get(str(reservation.table_id))
-            if table and table.statut in {
-                TableStatut.LIBRE.value,
-                TableStatut.RESERVEE.value,
-            }:
-                self.table_repo.update(table, {"statut": TableStatut.OCCUPEE.value})
+        for champ, valeur in changes.items():
+            setattr(reservation, champ, valeur)
+        self.db.flush()
 
+        if table_change and reservation.status == S.CONFIRMED.value and ancienne_table_id != nouvelle_table_id:
+            self._liberer_table_si_libre(ancienne_table_id, reservation)
+            self._reserver_table(nouvelle_table_id)
         self.db.flush()
         self.db.refresh(reservation)
-        logger.info(
-            f"Reservation checked-in: {reservation_id}, customer={customer.id}, session={session.id if session else None}"
-        )
         return reservation
 
-    def cancel_reservation(
-        self,
-        reservation_id: uuid.UUID,
-        reason: Optional[str] = None,
-        cancelled_by: Optional[uuid.UUID] = None,
-    ) -> Reservation:
-        reservation = self.reservation_repo.get(str(reservation_id))
-        if not reservation:
-            raise NotFoundError("Reservation not found")
-        if reservation.status in {
-            ReservationStatus.CANCELLED.value,
-            ReservationStatus.COMPLETED.value,
-            ReservationStatus.NO_SHOW.value,
-        }:
+    # ------------------------------------------------------------------ transitions
+    def confirmer(self, reservation: Reservation, notes: Optional[str]) -> Reservation:
+        if reservation.status == S.CONFIRMED.value:
+            # Confirmer deux fois : rien à faire, pas de second e-mail.
             return reservation
-
-        reservation.status = ReservationStatus.CANCELLED.value
-        reservation.cancelled_at = _utc_now()
-        reservation.cancelled_by = cancelled_by
-        reservation.cancel_reason = reason
-
-        if reservation.table_id is not None:
-            table = self.table_repo.get(str(reservation.table_id))
-            if table and table.restaurant_id == reservation.restaurant_id:
-                has_other_active = self._table_has_other_active_reservations(
-                    table.id, reservation.id
-                )
-                table_in_use_session = self.session_repo.get_session_by_table(
-                    reservation.restaurant_id, table.id
-                )
-                if not has_other_active and table_in_use_session is None:
-                    if table.statut == TableStatut.RESERVEE.value:
-                        self.table_repo.update(
-                            table, {"statut": TableStatut.LIBRE.value}
-                        )
-
+        verifier_transition(reservation.status, S.CONFIRMED.value)
+        reservation.status = S.CONFIRMED.value
+        reservation.confirmed_at = av.maintenant()
+        if notes:
+            reservation.notes = f"{reservation.notes}\n{notes}" if reservation.notes else notes
+        self._reserver_table(reservation.table_id)
         self.db.flush()
         self.db.refresh(reservation)
-        logger.info(f"Reservation cancelled: {reservation_id} by {cancelled_by}")
+        restaurant_emails.notify_reservation(self.db, reservation, "confirmed")
         return reservation
 
-    def _table_has_other_active_reservations(
-        self,
-        table_id: uuid.UUID,
-        exclude_reservation_id: uuid.UUID,
-    ) -> bool:
-        today_start = _utc_now() - timedelta(hours=12)
-        today_end = _utc_now() + timedelta(hours=12)
-        conflicts = self.reservation_repo.list_active_for_table_range(
-            table_id,
-            today_start,
-            today_end,
-            exclude_reservation_id=exclude_reservation_id,
+    def arriver(self, reservation: Reservation) -> Reservation:
+        verifier_transition(reservation.status, S.CHECKED_IN.value)
+        table = av.lock_table(self.db, reservation.table_id) if reservation.table_id else None
+        if table is not None and table.statut in (TableStatut.OCCUPEE.value, TableStatut.MAINTENANCE.value):
+            raise ConflictError(
+                f"La table {table.numero} est {'occupée' if table.statut == TableStatut.OCCUPEE.value else 'hors service'} : "
+                "libérez-la avant d'installer ce groupe."
+            )
+        session = RosService(self.db).open_session(
+            reservation.restaurant_id,
+            SessionCreate(
+                customer_id=reservation.customer_id,
+                table_id=reservation.table_id,
+                table_context=_contexte_session(table, reservation.party_size),
+            ),
         )
-        return len(conflicts) > 0
+        if table is not None:
+            table.statut = TableStatut.OCCUPEE.value
+        reservation.session_id = session.id
+        reservation.status = S.CHECKED_IN.value
+        reservation.checked_in_at = av.maintenant()
+        self.db.flush()
+        self.db.refresh(reservation)
+        logger.info("Reservation %s arrivee, session %s", reservation.id, session.id)
+        return reservation
 
-    def list_reservations(
-        self,
-        restaurant_id: uuid.UUID,
-        filters: Optional[ReservationListFilters] = None,
-    ) -> List[Reservation]:
-        return self.reservation_repo.list_for_restaurant(restaurant_id, filters)
+    def absent(self, reservation: Reservation) -> Reservation:
+        verifier_transition(reservation.status, S.NO_SHOW.value)
+        etait_confirmee = reservation.status == S.CONFIRMED.value
+        reservation.status = S.NO_SHOW.value
+        reservation.no_show_at = av.maintenant()
+        self.db.flush()
+        if etait_confirmee:
+            self._liberer_table_si_libre(reservation.table_id, reservation)
+        self.db.flush()
+        self.db.refresh(reservation)
+        return reservation
+
+    def terminer(self, reservation: Reservation) -> Reservation:
+        verifier_transition(reservation.status, S.COMPLETED.value)
+        # La session de salle appartient au plan : la table n'est pas libérée ici.
+        reservation.status = S.COMPLETED.value
+        reservation.completed_at = av.maintenant()
+        self.db.flush()
+        self.db.refresh(reservation)
+        return reservation
+
+    def annuler(self, reservation: Reservation, user_id: uuid.UUID, motif: str) -> Reservation:
+        verifier_transition(reservation.status, S.CANCELLED.value)
+        etait_confirmee = reservation.status == S.CONFIRMED.value
+        reservation.status = S.CANCELLED.value
+        reservation.cancelled_at = av.maintenant()
+        reservation.cancelled_by = user_id
+        reservation.cancel_reason = motif
+        self.db.flush()
+        if etait_confirmee:
+            self._liberer_table_si_libre(reservation.table_id, reservation)
+        restaurant_emails.notify_reservation(self.db, reservation, "cancelled")
+        self.db.flush()
+        self.db.refresh(reservation)
+        return reservation
+
+    def supprimer(self, reservation: Reservation, motif: Optional[str]) -> None:
+        if reservation.status == S.CHECKED_IN.value:
+            raise ConflictError("Une réservation arrivée ne se supprime pas : terminez-la.")
+        etait_confirmee = reservation.status == S.CONFIRMED.value
+        reservation.deleted_at = av.maintenant()
+        if motif:
+            reservation.cancel_reason = motif
+        self.db.flush()
+        if etait_confirmee:
+            self._liberer_table_si_libre(reservation.table_id, reservation)
+
+    # ------------------------------------------------------------------ disponibilité
+    def disponibilite(
+        self, restaurant_id: uuid.UUID, jour, couverts: int, duree: int
+    ) -> Dict[str, Any]:
+        restaurant = _restaurant(self.db, restaurant_id)
+        creneaux = av.creneaux_du_jour(self.db, restaurant, jour, couverts, duree)
+        zone = av.fuseau_de(restaurant)
+        return {
+            "date": jour.isoformat(),
+            "fuseau": av.nom_fuseau(restaurant),
+            "duree_minutes": duree,
+            "party_size": couverts,
+            "horaires_configures": av.horaires_configures(restaurant),
+            "creneaux": [
+                {
+                    "debut": c.debut,
+                    "heure": c.debut.astimezone(zone).strftime("%H:%M"),
+                    "tables_libres": c.tables_libres,
+                    "disponible": c.disponible,
+                    "passe": c.passe,
+                }
+                for c in creneaux
+            ],
+        }
+
+    # ------------------------------------------------------------------ clients
+    def rechercher_clients(self, restaurant_id: uuid.UUID, requete: str, limite: int = 10) -> List[RosCustomer]:
+        motif = f"%{requete.strip()}%"
+        return (
+            self.db.query(RosCustomer)
+            .filter(
+                RosCustomer.restaurant_id == restaurant_id,
+                or_(RosCustomer.name.ilike(motif), RosCustomer.phone.ilike(motif)),
+            )
+            .order_by(RosCustomer.name)
+            .limit(limite)
+            .all()
+        )
+
+    def resume_client(self, restaurant_id: uuid.UUID, customer_id: uuid.UUID) -> Dict[str, Any]:
+        client = self.db.get(RosCustomer, customer_id)
+        if client is None or client.restaurant_id != restaurant_id:
+            raise NotFoundError("Client introuvable")
+        visites, derniere = self.db.query(
+            func.count(RosOrder.id), func.max(RosOrder.created_at)
+        ).filter(
+            RosOrder.restaurant_id == restaurant_id,
+            RosOrder.customer_id == customer_id,
+            RosOrder.status.notin_(["DRAFT", "CANCELLED"]),
+        ).one()
+        base = self.db.query(func.count(Reservation.id)).filter(
+            Reservation.restaurant_id == restaurant_id,
+            Reservation.customer_id == customer_id,
+            Reservation.deleted_at.is_(None),
+        )
+        reservations = int(base.scalar() or 0)
+        absences = int(
+            base.filter(Reservation.status == S.NO_SHOW.value).scalar() or 0
+        )
+        return {
+            "id": client.id,
+            "name": client.name,
+            "phone": client.phone,
+            "email": client.email,
+            "visites": int(visites or 0),
+            "absences": absences,
+            "reservations": reservations,
+            "derniere_visite": derniere,
+        }
 
 
 class WaitlistService:
     def __init__(self, db: Session):
         self.db = db
-        self.waitlist_repo = WaitlistEntryRepository(db)
-        self.restaurant_repo = RestaurantRepository(db)
-        self.table_repo = TableRepository(db)
 
-    def add_to_waitlist(
-        self,
-        restaurant_id: uuid.UUID,
-        data: WaitlistCreate,
-    ) -> WaitlistEntry:
-        if not self.restaurant_repo.get(str(restaurant_id)):
-            raise NotFoundError("Restaurant not found")
-        if data.nombre_personnes <= 0:
-            raise ValidationError("Party size must be positive")
-
-        next_position = self.waitlist_repo.max_position(restaurant_id) + 1
-        entry_data = {
-            "restaurant_id": restaurant_id,
-            "customer_name": data.nom_client.strip(),
-            "customer_phone": _normalize(data.phone_client),
-            "party_size": data.nombre_personnes,
-            "position": next_position,
-            "estimated_wait_minutes": getattr(data, "temps_attente_estime", None),
-            "status": "WAITING",
-            "source": "POS",
-            "notes": _normalize(data.notes),
-            "preferences_jsonb": getattr(data, "metadata_jsonb", None),
-        }
-        entry = self.waitlist_repo.create(entry_data)
-        logger.info(
-            f"WaitlistEntry added: {entry.id} restaurant={restaurant_id} position={next_position}"
-        )
+    def charger(self, entry_id: uuid.UUID) -> WaitlistEntry:
+        entry = self.db.get(WaitlistEntry, entry_id)
+        if entry is None:
+            raise NotFoundError("Entrée de liste d'attente introuvable")
         return entry
 
-    def seat_party(
+    def _verrouiller_restaurant(self, restaurant_id: uuid.UUID) -> None:
+        # Verrou de ligne : deux ajouts simultanés attendent l'un l'autre, donc obtiennent
+        # deux positions différentes.
+        self.db.query(Restaurant.id).filter(Restaurant.id == restaurant_id).with_for_update().one_or_none()
+
+    def creer(self, restaurant_id: uuid.UUID, data: WaitlistCreate) -> WaitlistEntry:
+        _restaurant(self.db, restaurant_id)
+        ensure_refs_du_restaurant(
+            self.db,
+            restaurant_id,
+            table_ids=(data.requested_table_id,),
+            customer_id=data.customer_id,
+        )
+        self._verrouiller_restaurant(restaurant_id)
+        position = (
+            self.db.query(func.coalesce(func.max(WaitlistEntry.position), 0))
+            .filter(WaitlistEntry.restaurant_id == restaurant_id, WaitlistEntry.status == "WAITING")
+            .scalar()
+            or 0
+        ) + 1
+        entry = WaitlistEntry(
+            restaurant_id=restaurant_id,
+            customer_name=data.customer_name,
+            customer_phone=data.customer_phone,
+            customer_email=data.customer_email,
+            customer_id=data.customer_id,
+            party_size=data.party_size,
+            requested_table_id=data.requested_table_id,
+            position=position,
+            estimated_wait_minutes=data.estimated_wait_minutes,
+            status="WAITING",
+            source=data.source,
+            notes=data.notes,
+            preferences_jsonb=data.preferences_jsonb,
+            joined_at=av.maintenant(),
+        )
+        self.db.add(entry)
+        self.db.flush()
+        self.db.refresh(entry)
+        return entry
+
+    def _renumeroter(self, restaurant_id: uuid.UUID) -> None:
+        """Positions 1..n des entrées en attente, dans l'ordre, sans violer l'index unique.
+
+        Deux temps : décalage de toutes les positions au-delà de la plage, puis affectation
+        des positions définitives. Aucune valeur cible ne peut encore être occupée.
+        """
+        en_attente = (
+            self.db.query(WaitlistEntry)
+            .filter(WaitlistEntry.restaurant_id == restaurant_id, WaitlistEntry.status == "WAITING")
+            .order_by(WaitlistEntry.position, WaitlistEntry.joined_at, WaitlistEntry.id)
+            .all()
+        )
+        if not en_attente:
+            return
+        self.db.query(WaitlistEntry).filter(
+            WaitlistEntry.id.in_([e.id for e in en_attente])
+        ).update(
+            {WaitlistEntry.position: WaitlistEntry.position + DECALAGE_RENUMEROTATION},
+            synchronize_session=False,
+        )
+        for rang, entry in enumerate(en_attente, start=1):
+            entry.position = rang
+        self.db.flush()
+
+    def installer(
         self,
-        waitlist_id: uuid.UUID,
-        table_id: Optional[uuid.UUID] = None,
+        entry: WaitlistEntry,
+        table_id: Optional[uuid.UUID],
+        *,
+        forcer: bool,
     ) -> WaitlistEntry:
-        entry = self.waitlist_repo.get(str(waitlist_id))
-        if not entry:
-            raise NotFoundError("Waitlist entry not found")
         if entry.status != "WAITING":
-            raise BusinessLogicError(f"Cannot seat entry in status '{entry.status}'")
-
-        if table_id is not None:
-            table = self.table_repo.get(str(table_id))
-            if not table or table.restaurant_id != entry.restaurant_id:
-                raise ValidationError("Invalid table for this restaurant")
-            if table.statut == TableStatut.MAINTENANCE.value:
-                raise BusinessLogicError("Table is under maintenance")
-            if table.statut != TableStatut.LIBRE.value:
-                raise BusinessLogicError("Table is not available")
-            self.table_repo.update(table, {"statut": TableStatut.OCCUPEE.value})
-            entry.assigned_table_id = table_id
-
+            raise ConflictError("Cette entrée n'est plus en attente : elle ne peut pas être installée.")
+        if table_id is None:
+            raise RegleReservation("Choisissez la table où installer ce groupe.")
+        restaurant = _restaurant(self.db, entry.restaurant_id)
+        ensure_refs_du_restaurant(self.db, entry.restaurant_id, table_ids=(table_id,))
+        table = av.lock_table(self.db, table_id)
+        if table is None:
+            raise ValidationError("Table invalide pour ce restaurant")
+        if table.statut != TableStatut.LIBRE.value:
+            raise ConflictError(f"La table {table.numero} n'est pas libre.")
+        if table.capacite < entry.party_size and not forcer:
+            raise ConflictError(
+                f"La table {table.numero} accueille {table.capacite} personne(s) : "
+                f"{entry.party_size} couverts dépassent la capacité. Seule la gestion peut forcer."
+            )
+        maintenant = av.maintenant()
+        zone = av.fuseau_de(restaurant)
+        prochaines = av.reservations_actives_sur_table(
+            self.db, table.id, maintenant, av.DUREE_DEFAUT_MIN
+        )
+        if prochaines:
+            premier = prochaines[0]
+            raise ConflictError(
+                f"La table {table.numero} est réservée dans la prochaine heure et demie : "
+                f"{_description_conflit(premier, zone)}.",
+                details=_conflit_details(premier, zone),
+            )
+        session = RosService(self.db).open_session(
+            entry.restaurant_id,
+            SessionCreate(
+                customer_id=entry.customer_id,
+                table_id=table.id,
+                table_context=_contexte_session(table, entry.party_size),
+            ),
+        )
+        table.statut = TableStatut.OCCUPEE.value
         entry.status = "SEATED"
-        entry.seated_at = _utc_now()
-        old_position = entry.position
-        self.waitlist_repo.decrement_positions_after(entry.restaurant_id, old_position)
-        entry.position = 0
+        entry.seated_at = maintenant
+        entry.assigned_table_id = table.id
         self.db.flush()
+        self._renumeroter(entry.restaurant_id)
+        logger.info("Liste d'attente %s installee (session %s)", entry.id, session.id)
         self.db.refresh(entry)
-        logger.info(
-            f"WaitlistEntry seated: {waitlist_id} table={table_id}, position cleared"
-        )
         return entry
 
-    def promote_next(
-        self,
-        restaurant_id: uuid.UUID,
-        table_id: uuid.UUID,
-    ) -> Optional[WaitlistEntry]:
-        if not self.restaurant_repo.get(str(restaurant_id)):
-            raise NotFoundError("Restaurant not found")
-        table = self.table_repo.get(str(table_id))
-        if not table or table.restaurant_id != restaurant_id:
-            raise ValidationError("Invalid table for this restaurant")
-
-        next_entry = self.waitlist_repo.find_next_waiting(restaurant_id)
-        if next_entry is None:
-            logger.info(f"No waiting entry found for restaurant {restaurant_id}")
-            return None
-        return self.seat_party(next_entry.id, table_id=table_id)
-
-    def expire_entry(self, waitlist_id: uuid.UUID) -> WaitlistEntry:
-        entry = self.waitlist_repo.get(str(waitlist_id))
-        if not entry:
-            raise NotFoundError("Waitlist entry not found")
+    def retirer(self, entry: WaitlistEntry, motif: Optional[str]) -> WaitlistEntry:
         if entry.status != "WAITING":
-            return entry
-        old_position = entry.position
-        entry.status = "EXPIRED"
-        entry.expired_at = _utc_now()
-        self.waitlist_repo.decrement_positions_after(entry.restaurant_id, old_position)
-        entry.position = 0
+            raise ConflictError("Cette entrée n'est plus en attente : elle ne peut pas être retirée.")
+        entry.status = "REMOVED"
+        entry.removed_at = av.maintenant()
+        if motif:
+            entry.notes = f"{entry.notes}\n{motif}" if entry.notes else motif
         self.db.flush()
+        self._renumeroter(entry.restaurant_id)
         self.db.refresh(entry)
-        logger.info(f"WaitlistEntry expired: {waitlist_id}")
         return entry
+
+    def prevenir(self, entry: WaitlistEntry) -> str:
+        """Envoie « votre table est prête » après le commit. Renvoie l'adresse prévue."""
+        if entry.status != "WAITING":
+            raise ConflictError("Seule une entrée en attente peut être prévenue.")
+        adresse = (entry.customer_email or "").strip()
+        if not adresse:
+            raise RegleReservation("Cette entrée n'a pas d'adresse e-mail : prévenez le client sur place.")
+        restaurant = _restaurant(self.db, entry.restaurant_id)
+        zone = av.fuseau_de(restaurant)
+        maintenant = av.maintenant().astimezone(zone)
+        data = {
+            "customer_name": entry.customer_name,
+            "restaurant": restaurant.name,
+            "date": maintenant.strftime("%d/%m/%Y"),
+            "time": maintenant.strftime("%H:%M"),
+            "party_size": entry.party_size,
+            "table": None,
+            "reference": str(entry.id)[:8].upper(),
+            "kind": "table_ready",
+        }
+        email_templates.send_after_commit(self.db, "reservation", adresse, data, "fr")
+        return adresse

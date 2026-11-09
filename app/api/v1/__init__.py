@@ -12,6 +12,8 @@ from app.api.v1 import (
     pressing,
     pressing_machines,
     pressing_commandes,
+    emails,
+    restaurant_dashboard,
 )
 
 api_router = APIRouter(prefix="/v1")
@@ -28,3 +30,5 @@ api_router.include_router(reservations.router)
 api_router.include_router(pressing.router)
 api_router.include_router(pressing_machines.router)
 api_router.include_router(pressing_commandes.router)
+api_router.include_router(emails.router)
+api_router.include_router(restaurant_dashboard.router)

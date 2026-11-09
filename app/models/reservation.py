@@ -62,6 +62,7 @@ class Reservation(Base):
 
     confirmed_at = Column(DateTime(timezone=True), nullable=True)
     checked_in_at = Column(DateTime(timezone=True), nullable=True)
+    no_show_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     cancelled_at = Column(DateTime(timezone=True), nullable=True)
     cancelled_by = Column(
@@ -136,6 +137,11 @@ class WaitlistEntry(Base):
     )
     assigned_table_id = Column(
         UUID(as_uuid=True), ForeignKey("tables.id", ondelete="SET NULL"), nullable=True
+    )
+    customer_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("ros_customers.id", ondelete="SET NULL"),
+        nullable=True,
     )
     position = Column(Integer, nullable=False)
     estimated_wait_minutes = Column(Integer, nullable=True)

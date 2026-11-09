@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.models.user import User
 from app.repositories.transaction_repository import RefreshTokenRepository
 from app.repositories.user_repository import UserRepository
+from app.services import auth_emails
 from app.schemas.user import (
     UserCreate,
     UserLogin,
@@ -213,7 +214,9 @@ class AuthService:
         values = user_data.model_dump()
         values["role"] = "restaurant"
         values["password_hash"] = self.get_password_hash(values.pop("password"))
-        return self.user_repo.create(values)
+        user = self.user_repo.create(values)
+        auth_emails.send_welcome(user)
+        return user
 
     def authenticate_user(self, login_data: UserLogin) -> User:
         if not validate_email(login_data.email):
@@ -289,17 +292,7 @@ class AuthService:
         )
         self.user_repo.save_reset_token(str(user.id), token_hash, expires_at)
 
-        _send_notification_safe(
-            self.db,
-            "email",
-            user.email,
-            "Réinitialisation de votre mot de passe - Marinade",
-            f"Bonjour {user.first_name},\n\n"
-            f"Voici votre lien de réinitialisation (valide {settings.RESET_TOKEN_EXPIRE_MINUTES} min) :\n"
-            f"Token : {raw_token}\n\n"
-            f"Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.\n\n"
-            f"L'équipe Marinade",
-        )
+        auth_emails.send_password_reset(user, raw_token)
 
         logger.info(f"Password reset token issued for user {user.id}")
         return raw_token
@@ -327,6 +320,7 @@ class AuthService:
         # Un mot de passe réinitialisé doit couper les sessions déjà ouvertes :
         # c'est souvent la raison pour laquelle l'utilisateur le réinitialise.
         self.refresh_token_repo.delete_by_user_id(user.id)
+        auth_emails.send_password_changed(user)
         logger.info(f"Password reset successful for user {user.id}")
         return True
 
@@ -346,17 +340,7 @@ class AuthService:
         )
         self.user_repo.save_verification_token(str(user_id), token_hash, expires_at)
 
-        _send_notification_safe(
-            self.db,
-            "email",
-            user.email,
-            "Vérification de votre email - Marinade",
-            f"Bonjour {user.first_name},\n\n"
-            f"Merci de vérifier votre email en utilisant ce token :\n"
-            f"Token : {raw_token}\n\n"
-            f"Valide pendant {settings.VERIFICATION_TOKEN_EXPIRE_HOURS}h.\n\n"
-            f"L'équipe Marinade",
-        )
+        auth_emails.send_verification(user, raw_token)
 
         logger.info(f"Email verification token issued for user {user.id}")
         return raw_token

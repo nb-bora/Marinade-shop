@@ -1,0 +1,104 @@
+# Blueprint Render : API FastAPI + base PostgreSQL dans la même région (réseau privé).
+# Le déploiement n'est PAS automatique : c'est le workflow GitHub Actions (.github/workflows/ci-deploy.yml)
+# qui le déclenche, après que les tests sont verts sur main.
+#
+# Les variables marquées `sync: false` sont à renseigner dans le tableau de bord Render
+# (elles ne sont jamais committées).
+
+services:
+  - type: web
+    name: marinade-api
+    runtime: python
+    region: frankfurt
+    plan: free
+    branch: main
+    # Pas de déploiement sur simple push : seul le pipeline déclenche un déploiement.
+    autoDeploy: false
+    buildCommand: pip install -r requirements.txt
+    # Migrations d'abord (rôle propriétaire), puis démarrage de l'API (rôle applicatif).
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+
+      # --- Application ---
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: SKIP_DB_INIT
+        value: "true"
+      - key: DEV_EXPOSE_AUTH_TOKENS
+        value: "false"
+      - key: ALLOW_LEGACY_PAYMENT_SIMULATION
+        value: "false"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: TWO_FACTOR_ENCRYPTION_KEY
+        generateValue: true
+      - key: FRONTEND_URL
+        sync: false                # ex. https://marinade.vercel.app
+      - key: ALLOW_ORIGINS
+        sync: false                # liste https séparée par des virgules, ex. https://marinade.vercel.app
+      - key: ALLOW_CREDENTIALS
+        value: "true"
+      - key: ALLOW_METHODS
+        value: GET,POST,PUT,PATCH,DELETE,OPTIONS
+      - key: ALLOW_HEADERS
+        value: Authorization,Content-Type,X-Request-ID,X-Tenant-ID,X-Signature
+
+      # --- Base de données (même région => connexion privée, sans sortir sur Internet) ---
+      - key: DB_HOST
+        fromDatabase:
+          name: marinade-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: marinade-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: marinade-db
+          property: database
+      - key: DB_SSLMODE
+        value: require             # exigé en production pour une base distante
+      - key: DB_USER
+        value: marinade_app        # rôle applicatif, créé par scripts/db/bootstrap_roles.sql
+      - key: DB_PASSWORD
+        sync: false
+      - key: MIGRATION_DATABASE_URL
+        sync: false                # postgresql://marinade_owner:...@<host>:<port>/marinade?sslmode=require
+
+      # --- Easy Transact (obligatoire en production, sinon l'application refuse de démarrer) ---
+      - key: EASYTRANSACT_API_BASE_URL
+        sync: false
+      - key: EASYTRANSACT_API_TOKEN
+        sync: false
+      - key: EASYTRANSACT_WEBHOOK_SECRET
+        sync: false
+
+      # --- Emails (Gmail SMTP, mot de passe d'application) ---
+      - key: EMAIL_BACKEND
+        value: smtp
+      - key: EMAIL_FROM
+        sync: false
+      - key: EMAIL_FROM_NAME
+        value: Marinade
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_SECURITY
+        value: starttls
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+
+databases:
+  - name: marinade-db
+    databaseName: marinade
+    user: marinade_admin           # administrateur Render, utilisé uniquement pour bootstrap_roles.sql
+    region: frankfurt
+    plan: free

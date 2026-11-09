@@ -21,7 +21,7 @@ from sqlalchemy import text
 from tests.support import ITEMS
 
 # Tables volontairement SANS RLS : identité et référentiels globaux.
-NO_RLS = {"users", "refresh_tokens", "subscription_tiers", "alembic_version"}
+NO_RLS = {"users", "refresh_tokens", "subscription_tiers", "alembic_version", "auth_sessions", "auth_throttle", "auth_one_time_use"}
 
 # Table fille -> (colonne de rattachement, table parente) : pas de restaurant_id propre,
 # l'isolement passe par la ligne parente.
@@ -33,7 +33,6 @@ CHILDREN = {
     "commande_refunds": ("commande_id", "commandes"),
     "combinaison_composants": ("combinaison_id", "combinaisons"),
     "stock_composants": ("composant_id", "composants"),
-    "stock_mouvements": ("composant_id", "composants"),
     "payment_events": ("payment_intent_id", "payment_intents"),
 }
 

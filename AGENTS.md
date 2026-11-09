@@ -183,6 +183,11 @@ pytest tests/test_main.py::test_email_validation
 - `POST /v1/restaurants/{id}/commandes` - Créer commande
 - `GET /v1/restaurants/{id}/commandes` - Lister commandes
 
+### Emails
+- `GET /v1/emails/status` - Configuration d'envoi active (admin, sans secret)
+- `POST /v1/emails/test` - Envoyer un email de test (admin)
+- Variables : `EMAIL_BACKEND` (auto/smtp/console/memory/disabled), `EMAIL_FROM`, `SMTP_HOST/PORT/SECURITY/USERNAME/PASSWORD`, `FRONTEND_URL` (voir `.env.example`). Code : `app/services/email_service.py`, `auth_emails.py`.
+
 ## Architecture en Couches
 
 1. **API Layer** (`app/api/`) - Routes FastAPI et validation des requêtes

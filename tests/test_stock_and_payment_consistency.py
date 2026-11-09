@@ -212,7 +212,7 @@ class TestLegacyStockLifecycle:
 
         refused = add_item(client, shop, commande, plat_id=plat_id, quantite=2)  # il faut 4 riz
         assert refused.status_code == 409, refused.text
-        assert refused.json()["error"] == "InsufficientStockError"
+        assert refused.json()["code"] == "stock.insufficient"
         shortage = refused.json()["details"]
         assert [d["nom"] for d in shortage] == ["Riz"]
         assert (shortage[0]["requis"], shortage[0]["disponible"]) == ("4.000", "3.000")
@@ -470,7 +470,7 @@ class TestRosStock:
 
         refused = ros_order(client, shop, [{"product_id": a, "quantity": 2}, {"product_id": b, "quantity": 2}])
         assert refused.status_code == 409, refused.text
-        assert refused.json()["error"] == "InsufficientStockError"
+        assert refused.json()["code"] == "stock.insufficient"
         assert reporting_orders(client, shop) == before
         assert stock(client, shop, poulet)["quantite"] == 100, "le plat A était servable : rien n'est sorti"
         assert stock(client, shop, riz)["quantite"] == 5

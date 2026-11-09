@@ -277,6 +277,7 @@ def test_production_refuses_to_boot_with_token_exposure_enabled():
             SECRET_KEY="x" * 40,
             ALLOW_ORIGINS="https://app.example.com",
             SKIP_DB_INIT=True,
+            DB_PASSWORD="a-long-unique-db-password-2026",
             EASYTRANSACT_API_BASE_URL="https://api.example.com",
             EASYTRANSACT_API_TOKEN="t",
             EASYTRANSACT_WEBHOOK_SECRET="s",

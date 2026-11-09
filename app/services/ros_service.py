@@ -1,11 +1,20 @@
 import hashlib
+import logging
 import uuid
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.services import kitchen_states as kstates
+
+logger = logging.getLogger(__name__)
+
+# Poste par défaut d'un article du catalogue dont le poste n'est pas renseigné.
+_DEFAULT_STATION = {"plat": "KITCHEN", "combinaison": "KITCHEN", "boisson": "BAR"}
 
 from app.utils.exceptions import (
     AuthorizationError,
@@ -39,6 +48,7 @@ from app.models.ros import (
     RosAuditLog,
 )
 from app.core.database import get_db_context, set_db_context
+from app.services import restaurant_emails
 from app.services.stock_engine import StockEngine, requirements_to_json
 from app.services.stock_requirements import (
     ProductLine,
@@ -50,6 +60,9 @@ from app.models.restaurant import (
     StockMouvement,
     CombinaisonComposant,
     Composant,
+    Combinaison,
+    Boisson,
+    Plat,
     Restaurant,
     Table,
 )
@@ -68,6 +81,7 @@ from app.repositories.ros_repository import (
 from app.schemas.ros import (
     CustomerCreate,
     SessionCreate,
+    SessionUpdate,
     OrderCreate,
     PaymentCreate,
     SplitPaymentRequest,
@@ -159,6 +173,37 @@ class RosService:
         )
         return session
 
+    def update_session(
+        self,
+        restaurant_id: uuid.UUID,
+        session_id: uuid.UUID,
+        data: SessionUpdate,
+        actor_id: Optional[uuid.UUID] = None,
+    ) -> ServiceSession:
+        """Met à jour une session OUVERTE (couverts, zone). Une session terminée ne se modifie plus."""
+        session = self.session_repo.get(str(session_id))
+        if not session or session.restaurant_id != restaurant_id:
+            raise NotFoundError(f"Session {session_id} introuvable")
+        if session.status in (SessionStatus.CLOSED.value, SessionStatus.SETTLED.value):
+            raise ConflictError("Cette session est terminée : elle ne peut plus être modifiée")
+
+        changes = data.model_dump(exclude_unset=True)
+        if not changes:
+            return session
+
+        before = {"table_context": session.table_context}
+        updated = self.session_repo.update(session, changes)
+        self.audit_repo.log_action(
+            restaurant_id=restaurant_id,
+            action="UPDATE_SESSION",
+            entity_name="ServiceSession",
+            entity_id=session.id,
+            actor_id=actor_id,
+            before_state=before,
+            after_state={"table_context": updated.table_context},
+        )
+        return updated
+
     def get_active_sessions(
         self, restaurant_id: uuid.UUID, skip: int = 0, limit: int = 100
     ) -> List[ServiceSession]:
@@ -188,6 +233,15 @@ class RosService:
         updated_session = self.session_repo.update(
             session, {"status": SessionStatus.CLOSED.value, "closed_at": datetime.now()}
         )
+
+        # Une session close n'a plus de service : ses tickets encore ouverts sont annulés
+        # pour ne pas rester affichés en cuisine.
+        for ticket in self.ticket_repo.open_for_session(session.id):
+            self._cancel_ticket(
+                ticket,
+                actor_id=actor_id,
+                reason="Session clôturée avant préparation",
+            )
 
         self.audit_repo.log_action(
             restaurant_id=restaurant_id,
@@ -328,8 +382,10 @@ class RosService:
         )
 
         # Lignes de commande et routage vers les postes (cuisine, bar, dessert)
+        catalog_stations = self._catalog_stations(restaurant_id, refs)
         station_items: Dict[str, List[dict]] = {}
         for item, nom, price, vat, kind in priced:
+            station = self._routed_station(item, refs, catalog_stations)
             self.db.add(
                 RosOrderItem(
                     order_id=order.id,
@@ -338,12 +394,12 @@ class RosService:
                     quantity=item.quantity,
                     unit_price=price,
                     tax_rate=vat,
-                    destination_station=item.destination_station.value,
+                    destination_station=station,
                     notes=item.notes,
                     details_jsonb={**(item.details_jsonb or {}), "kind": kind},
                 )
             )
-            station_items.setdefault(item.destination_station.value, []).append(
+            station_items.setdefault(station, []).append(
                 {"product_name": nom, "quantity": item.quantity, "notes": item.notes}
             )
 
@@ -351,24 +407,14 @@ class RosService:
         # soit le nombre d'articles. Echec = rien de cree, rien de sorti.
         requirements = requirements_for(self.db, restaurant_id, stock_lines)
         if requirements:
-            low_stock = self.stock_engine.consume_direct(
+            # Le moteur journalise lui-même l'alerte de seuil (STOCK_ALERT_LOW) après la sortie.
+            self.stock_engine.consume_direct(
                 requirements,
                 "ROS_ORDER",
                 order.id,
                 f"Consommation automatique pour la commande ROS {order.id}",
+                acteur_user_id=None,
             )
-            for stock in low_stock:
-                self.audit_repo.log_action(
-                    restaurant_id=restaurant_id,
-                    action="STOCK_ALERT_LOW",
-                    entity_name="StockComposant",
-                    entity_id=stock.id,
-                    after_state={
-                        "quantite": str(stock.quantite),
-                        "seuil_alerte": str(stock.seuil_alerte),
-                    },
-                    reason=f"Stock sous le seuil d'alerte suite à la commande ROS {order.id}",
-                )
 
         self.db.flush()
 
@@ -399,6 +445,39 @@ class RosService:
         )
 
         return order
+
+    def _catalog_stations(self, restaurant_id: uuid.UUID, refs) -> Dict[uuid.UUID, str]:
+        """Poste de production de chaque article vendu du catalogue (plat, combinaison, boisson)."""
+        stations: Dict[uuid.UUID, str] = {}
+        for kind, model in (("plat", Plat), ("combinaison", Combinaison), ("boisson", Boisson)):
+            ids = [ref.id for ref in refs.values() if ref.kind == kind]
+            if not ids:
+                continue
+            rows = self.db.execute(
+                select(model.id, model.station).where(
+                    model.restaurant_id == restaurant_id, model.id.in_(ids)
+                )
+            )
+            for product_id, station in rows:
+                stations[product_id] = station or _DEFAULT_STATION[kind]
+        return stations
+
+    def _routed_station(self, item, refs, catalog_stations: Dict[uuid.UUID, str]) -> str:
+        """Poste d'une ligne : celui de l'article du catalogue. Le poste envoyé par la
+        caisse n'est pris en compte que pour une ligne libre (sans article du catalogue)."""
+        requested = item.destination_station.value
+        ref = refs.get(item.product_id) if item.product_id else None
+        if ref is None or ref.kind == "composant":
+            return requested
+        station = catalog_stations.get(ref.id, _DEFAULT_STATION[ref.kind])
+        if requested != station:
+            logger.warning(
+                "Poste demandé %s ignoré pour « %s » : le catalogue le place en %s",
+                requested,
+                ref.nom,
+                station,
+            )
+        return station
 
     def _ensure_invoice_for_order(
         self,
@@ -491,30 +570,184 @@ class RosService:
     # -------------------------------------------------------------------------
     # PRODUCTION TICKETS (KDS / BAR DISPLAY)
     # -------------------------------------------------------------------------
-    def get_pending_tickets(
-        self,
-        restaurant_id: uuid.UUID,
-        station: ProductionStation,
-        skip: int = 0,
-        limit: int = 100,
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _window_start(self, now: datetime) -> datetime:
+        return now - timedelta(hours=settings.KDS_TICKET_WINDOW_HOURS)
+
+    def get_board(
+        self, restaurant_id: uuid.UUID, station: ProductionStation
     ) -> List[ProductionTicket]:
-        return self.ticket_repo.get_pending_by_station(
-            restaurant_id, station.value, skip, limit
+        """Tickets affichés sur l'écran d'un poste (voir ProductionTicketRepository.get_board)."""
+        now = self._now()
+        tickets = self.ticket_repo.get_board(
+            restaurant_id,
+            station.value,
+            window_start=self._window_start(now),
+            ready_since=now - kstates.READY_DISPLAY_WINDOW,
+            served_since=now - kstates.RECALL_WINDOW,
+        )
+        self._attach_locations(tickets)
+        return tickets
+
+    def _attach_locations(self, tickets: List[ProductionTicket]) -> None:
+        """Renseigne table et zone de chaque ticket en une seule requête (non stockées sur le ticket)."""
+        if not tickets:
+            return
+        rows = self.db.execute(
+            select(
+                RosOrder.id,
+                Table.numero,
+                Table.emplacement,
+                ServiceSession.table_context,
+            )
+            .select_from(RosOrder)
+            .outerjoin(ServiceSession, ServiceSession.id == RosOrder.session_id)
+            .outerjoin(Table, Table.id == ServiceSession.table_id)
+            .where(RosOrder.id.in_({ticket.order_id for ticket in tickets}))
+        ).all()
+        places = {
+            order_id: (
+                f"Table {numero}" if numero else None,
+                emplacement or table_context or None,
+            )
+            for order_id, numero, emplacement, table_context in rows
+        }
+        for ticket in tickets:
+            ticket.table_label, ticket.zone = places.get(ticket.order_id, (None, None))
+
+    def station_summary(
+        self, restaurant_id: uuid.UUID, station: ProductionStation
+    ) -> Dict[str, Any]:
+        """« Tout le service » : quantités par article, tous tickets à faire de la fenêtre."""
+        now = self._now()
+        tickets = self.ticket_repo.open_in_window(
+            restaurant_id, station.value, self._window_start(now)
+        )
+        totals: Dict[str, int] = {}
+        for ticket in tickets:
+            for line in ticket.items_jsonb or []:
+                name = str(line.get("product_name") or "Article")
+                totals[name] = totals.get(name, 0) + int(line.get("quantity") or 0)
+        items = [
+            {"product_name": name, "quantity": qty}
+            for name, qty in sorted(totals.items(), key=lambda pair: (-pair[1], pair[0]))
+        ]
+        return {
+            "station": station.value,
+            "window_hours": settings.KDS_TICKET_WINDOW_HOURS,
+            "ticket_count": len(tickets),
+            "total_quantity": sum(totals.values()),
+            "items": items,
+        }
+
+    def _locked_ticket(
+        self, restaurant_id: uuid.UUID, ticket_id: uuid.UUID
+    ) -> ProductionTicket:
+        ticket = self.ticket_repo.get_for_update(ticket_id)
+        if not ticket or ticket.restaurant_id != restaurant_id:
+            raise NotFoundError(f"Ticket {ticket_id} introuvable")
+        return ticket
+
+    def _audit_ticket(
+        self,
+        ticket: ProductionTicket,
+        before: str,
+        actor_id: Optional[uuid.UUID],
+        reason: Optional[str] = None,
+    ) -> None:
+        self.audit_repo.log_action(
+            restaurant_id=ticket.restaurant_id,
+            action="TICKET_STATUS",
+            entity_name="ProductionTicket",
+            entity_id=ticket.id,
+            actor_id=actor_id,
+            before_state={"status": before},
+            after_state={"status": ticket.status},
+            reason=reason,
         )
 
     def update_ticket_status(
-        self, restaurant_id: uuid.UUID, ticket_id: uuid.UUID, new_status: TicketStatus
+        self,
+        restaurant_id: uuid.UUID,
+        ticket_id: uuid.UUID,
+        new_status: TicketStatus,
+        *,
+        actor_id: Optional[uuid.UUID] = None,
+        can_reverse: bool = False,
     ) -> ProductionTicket:
-        ticket = self.ticket_repo.get(str(ticket_id))
-        if not ticket or ticket.restaurant_id != restaurant_id:
-            raise NotFoundError(f"Ticket {ticket_id} introuvable")
+        """Fait avancer un ticket selon la machine d'états (409 si interdit, 403 si retour
+        arrière sans la gestion)."""
+        ticket = self._locked_ticket(restaurant_id, ticket_id)
+        before = ticket.status
+        updates = kstates.transition_updates(
+            ticket, new_status, can_reverse=can_reverse, now=self._now()
+        )
+        self.ticket_repo.update(ticket, updates)
+        self._audit_ticket(ticket, before, actor_id)
+        self._attach_locations([ticket])
+        return ticket
 
-        update_fields = {"status": new_status.value}
-        if new_status == TicketStatus.READY:
-            update_fields["ready_at"] = datetime.now()
+    def recall_ticket(
+        self,
+        restaurant_id: uuid.UUID,
+        ticket_id: uuid.UUID,
+        actor_id: Optional[uuid.UUID] = None,
+    ) -> ProductionTicket:
+        ticket = self._locked_ticket(restaurant_id, ticket_id)
+        before = ticket.status
+        self.ticket_repo.update(ticket, kstates.recall_updates(ticket, now=self._now()))
+        self._audit_ticket(ticket, before, actor_id, reason="Rappel d'un ticket servi")
+        self._attach_locations([ticket])
+        return ticket
 
-        updated_ticket = self.ticket_repo.update(ticket, update_fields)
-        return updated_ticket
+    def set_ticket_priority(
+        self,
+        restaurant_id: uuid.UUID,
+        ticket_id: uuid.UUID,
+        priority: int,
+        actor_id: Optional[uuid.UUID] = None,
+    ) -> ProductionTicket:
+        ticket = self._locked_ticket(restaurant_id, ticket_id)
+        if ticket.status not in kstates.ACTIVE_STATUSES:
+            raise ConflictError("Seul un ticket à faire peut être marqué urgent.")
+        if ticket.priority != priority:
+            self.ticket_repo.update(ticket, {"priority": priority})
+        self._attach_locations([ticket])
+        return ticket
+
+    def _cancel_ticket(
+        self,
+        ticket: ProductionTicket,
+        *,
+        actor_id: Optional[uuid.UUID] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        before = ticket.status
+        self.ticket_repo.update(
+            ticket,
+            kstates.transition_updates(
+                ticket, TicketStatus.CANCELLED, can_reverse=True, now=self._now()
+            ),
+        )
+        self._audit_ticket(ticket, before, actor_id, reason=reason)
+
+    def expire_stale_tickets(
+        self, restaurant_id: uuid.UUID, actor_id: Optional[uuid.UUID] = None
+    ) -> int:
+        """Annule les tickets encore à faire plus anciens que la fenêtre. Renvoie leur nombre."""
+        stale = self.ticket_repo.open_older_than(
+            restaurant_id, self._window_start(self._now())
+        )
+        for ticket in stale:
+            self._cancel_ticket(
+                ticket,
+                actor_id=actor_id,
+                reason=f"Ticket périmé (plus de {settings.KDS_TICKET_WINDOW_HOURS} h)",
+            )
+        return len(stale)
 
     # -------------------------------------------------------------------------
     # PAYMENT PROCESSING & SPLIT BILL
@@ -610,6 +843,9 @@ class RosService:
                 "method": data.payment_method.value,
             },
         )
+
+        if invoice_status == InvoiceStatus.PAID.value:
+            restaurant_emails.notify_receipt(self.db, invoice, data.payment_method.value)
 
         return payment
 
@@ -763,6 +999,13 @@ class RosService:
             else "Shift fermé sans écart",
         )
 
+        # Les tickets ne sont pas rattachés à un shift : sa clôture balaie les tickets
+        # périmés du restaurant, pour que l'écran ne garde pas un service précédent.
+        self.expire_stale_tickets(restaurant_id, actor_id=operator_user_id)
+
+        restaurant_emails.notify_shift_closed(
+            self.db, closed_shift, self.get_shift_summary(closed_shift)
+        )
         return closed_shift
 
     def get_current_shift(

@@ -1,0 +1,102 @@
+name: CI et déploiement Render
+
+# Tests sur chaque push et pull request.
+# Déploiement sur Render UNIQUEMENT pour un push sur main, et seulement si tous les tests sont verts.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.13"
+  # Mots de passe de la base de CI uniquement (base jetable, éphémère, jamais en production).
+  CI_PG_ADMIN_PASSWORD: ci-admin-only
+  CI_OWNER_PASSWORD: ci-owner-only
+  CI_APP_PASSWORD: ci-app-only
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-admin-only
+          POSTGRES_DB: marinade_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
+
+      - name: Tests unitaires (sans TEST_DATABASE_URL, les tests d'intégration s'ignorent)
+        env:
+          TEST_DATABASE_URL: ""
+        run: python -m pytest -q -p no:cacheprovider
+
+      - name: Créer les rôles PostgreSQL (propriétaire + applicatif)
+        env:
+          PGPASSWORD: ${{ env.CI_PG_ADMIN_PASSWORD }}
+        run: |
+          psql -h localhost -U postgres -d marinade_test -v ON_ERROR_STOP=1 \
+            -v owner_password="$CI_OWNER_PASSWORD" -v app_password="$CI_APP_PASSWORD" \
+            -f scripts/db/bootstrap_roles.sql
+
+      - name: Migrations Alembic (rôle propriétaire, comme en production)
+        env:
+          MIGRATION_DATABASE_URL: postgresql://marinade_owner:${{ env.CI_OWNER_PASSWORD }}@localhost:5432/marinade_test?sslmode=disable
+        run: alembic upgrade head
+
+      - name: Tests d'intégration PostgreSQL et RLS (rôle applicatif)
+        env:
+          TEST_DATABASE_URL: postgresql://marinade_app:${{ env.CI_APP_PASSWORD }}@localhost:5432/marinade_test?sslmode=disable
+        run: >-
+          python -m pytest -q -p no:cacheprovider
+          tests/test_api_integration.py tests/test_query_budget.py
+          tests/test_stock_and_payment_consistency.py tests/test_payment_history.py
+          tests/test_user_access.py tests/test_rls_audit.py
+
+  deploy:
+    name: Déploiement Render
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Déployer sur Render et vérifier API + base de données
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          RENDER_SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: python scripts/deploy/render_deploy.py

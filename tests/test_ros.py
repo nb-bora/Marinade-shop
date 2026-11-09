@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import uuid
 from decimal import Decimal
@@ -23,6 +25,15 @@ from app.utils.ros_enums import (
     CashShiftStatus,
 )
 from app.services.auth_service import AuthService
+
+
+# Ces tests écrivent en base (create_all, commits). Ils ne doivent JAMAIS tourner
+# sur la base de l'application : on exige TEST_DATABASE_URL, comme les autres
+# tests d'intégration. TODO : les migrer vers la fixture postgres_test_session.
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("TEST_DATABASE_URL", "").strip(),
+    reason="Set TEST_DATABASE_URL: ces tests écriraient dans la base de l'application.",
+)
 
 
 @pytest.fixture

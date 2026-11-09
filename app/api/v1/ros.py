@@ -10,18 +10,23 @@ from fastapi import (
 )
 from app.utils.ws_manager import kds_manager
 
+import asyncio
+import logging
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.core.database import get_db
 from app.api.dependencies import (
+    _authorize_websocket_sync,
     authenticate_websocket,
     current_tenant_id,
     ensure_tenant_role,
     get_current_user,
     has_tenant_role,
     require_tenant_path,
+    websocket_token,
 )
 from app.models.user import User
 from app.services.ros_service import RosService
@@ -29,11 +34,15 @@ from app.schemas.ros import (
     CustomerCreate,
     CustomerResponse,
     SessionCreate,
+    SessionUpdate,
     SessionResponse,
     OrderCreate,
     OrderResponse,
     TicketResponse,
     TicketStatusUpdate,
+    TicketPriorityUpdate,
+    TicketSummaryResponse,
+    TicketExpireResponse,
     InvoiceResponse,
     PaymentCreate,
     PaymentResponse,
@@ -52,6 +61,8 @@ from app.utils.ros_enums import ProductionStation
 
 from app.api import permissions as perm  # noqa: E402
 from app.api.pagination import Page, page_params  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 # Fail-safe : toute route de ce routeur qui désigne un restaurant est d'abord
 # autorisée sur CE restaurant, même si l'on oublie d'y ajouter un contrôle de rôle.
@@ -121,6 +132,24 @@ def get_active_sessions(
 ):
     service = RosService(db)
     return service.get_active_sessions(restaurant_id, page.skip, page.limit)
+
+
+@router.put(
+    "/restaurants/{restaurant_id}/sessions/{session_id}",
+    dependencies=[Depends(perm.FRONT_OF_HOUSE)],
+    response_model=SessionResponse,
+    summary="Modifier une session ouverte (couverts, zone)",
+)
+def update_session(
+    restaurant_id: UUID,
+    session_id: UUID,
+    data: SessionUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return RosService(db).update_session(
+        restaurant_id, session_id, data, current_user.id
+    )
 
 
 @router.post(
@@ -213,24 +242,51 @@ def get_session_invoice(
     "/restaurants/{restaurant_id}/tickets/{station}",
     dependencies=[Depends(perm.PRODUCTION_TICKETS)],
     response_model=List[TicketResponse],
-    summary="Obtenir les tickets en attente pour une station (KITCHEN, BAR, DESSERT)",
+    summary="Tickets affichés sur l'écran d'un poste (KITCHEN, BAR, DESSERT)",
+    description="""
+    À faire et en préparation créés dans la fenêtre `KDS_TICKET_WINDOW_HOURS`, « Prêt »
+    depuis moins de 30 minutes, « Servi » encore rappelables (2 minutes). Tri : priorité
+    décroissante, puis ancienneté. Plafonné à 500 tickets.
+    """,
 )
-def get_pending_tickets(
+def get_station_board(
     restaurant_id: UUID,
     station: ProductionStation,
-    page: Page = Depends(page_params),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    service = RosService(db)
-    return service.get_pending_tickets(restaurant_id, station, page.skip, page.limit)
+    return RosService(db).get_board(restaurant_id, station)
+
+
+@router.get(
+    "/restaurants/{restaurant_id}/tickets/{station}/summary",
+    dependencies=[Depends(perm.PRODUCTION_TICKETS)],
+    response_model=TicketSummaryResponse,
+    summary="« Tout le service » : quantités par article d'un poste",
+)
+def get_station_summary(
+    restaurant_id: UUID,
+    station: ProductionStation,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return RosService(db).station_summary(restaurant_id, station)
 
 
 @router.put(
     "/restaurants/{restaurant_id}/tickets/{ticket_id}/status",
     dependencies=[Depends(perm.PRODUCTION_TICKETS)],
     response_model=TicketResponse,
-    summary="Mettre à jour le statut d'un ticket de production (QUEUED, IN_PREPARATION, READY, SERVED)",
+    summary="Faire avancer un ticket (QUEUED, IN_PREPARATION, READY, SERVED, CANCELLED)",
+    description="""
+    Transitions contrôlées : À préparer -> En préparation -> Prêt -> Servi, et annulation
+    avant « Prêt ». Le retour arrière (En préparation -> À préparer, Prêt -> En préparation)
+    est réservé à la gestion. Le rappel d'un ticket servi passe par `/recall`.
+    """,
+    responses={
+        403: {"description": "Retour arrière réservé à la gestion."},
+        409: {"description": "Transition interdite ou ticket déjà dans cet état."},
+    },
 )
 def update_ticket_status(
     restaurant_id: UUID,
@@ -239,8 +295,63 @@ def update_ticket_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    service = RosService(db)
-    return service.update_ticket_status(restaurant_id, ticket_id, data.status)
+    return RosService(db).update_ticket_status(
+        restaurant_id,
+        ticket_id,
+        data.status,
+        actor_id=current_user.id,
+        can_reverse=has_tenant_role(db, current_user, restaurant_id, perm.MANAGEMENT_ROLES),
+    )
+
+
+@router.post(
+    "/restaurants/{restaurant_id}/tickets/{ticket_id}/recall",
+    dependencies=[Depends(perm.PRODUCTION_TICKETS)],
+    response_model=TicketResponse,
+    summary="Rappeler un ticket servi (il redevient « Prêt ») pendant 2 minutes",
+    responses={409: {"description": "Ticket non servi ou délai de rappel dépassé."}},
+)
+def recall_ticket(
+    restaurant_id: UUID,
+    ticket_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return RosService(db).recall_ticket(restaurant_id, ticket_id, actor_id=current_user.id)
+
+
+@router.put(
+    "/restaurants/{restaurant_id}/tickets/{ticket_id}/priority",
+    dependencies=[Depends(perm.PRODUCTION_TICKETS)],
+    response_model=TicketResponse,
+    summary="Marquer un ticket urgent (1) ou normal (0) : l'urgent passe en tête de file",
+    responses={409: {"description": "Le ticket n'est plus à faire."}},
+)
+def set_ticket_priority(
+    restaurant_id: UUID,
+    ticket_id: UUID,
+    data: TicketPriorityUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return RosService(db).set_ticket_priority(
+        restaurant_id, ticket_id, data.priority, actor_id=current_user.id
+    )
+
+
+@router.post(
+    "/restaurants/{restaurant_id}/tickets/expire",
+    dependencies=[Depends(perm.MANAGEMENT)],
+    response_model=TicketExpireResponse,
+    summary="Annuler les tickets encore à faire plus anciens que la fenêtre (gestion)",
+)
+def expire_stale_tickets(
+    restaurant_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    cancelled = RosService(db).expire_stale_tickets(restaurant_id, actor_id=current_user.id)
+    return TicketExpireResponse(cancelled=cancelled)
 
 
 # -----------------------------------------------------------------------------
@@ -455,19 +566,47 @@ async def websocket_kds_endpoint(
     if subprotocol is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
+    token, _ = websocket_token(websocket)
     rest_str = str(restaurant_id)
     station_str = station.value
     await kds_manager.connect(
         websocket, rest_str, station_str, subprotocol=subprotocol or None
     )
     try:
-        while True:
-            # Garde la connexion ouverte ; `ping` -> `pong` (battement de cœur de l'écran).
-            # Le format des messages poussés est décrit dans app/utils/ws_manager.py.
-            if (await websocket.receive_text()).strip().lower() == "ping":
-                await websocket.send_text("pong")
+        await _serve_kds_screen(websocket, token, restaurant_id)
     except WebSocketDisconnect:
+        pass
+    except Exception:  # connexion rompue en cours de route : rien à faire de plus
+        logger.debug("KDS: connexion interrompue", exc_info=True)
+    finally:
+        # Toujours désenregistrer l'écran, même si la boucle a échoué (pas d'entrée fantôme).
         kds_manager.disconnect(websocket, rest_str, station_str)
+
+
+KDS_REVALIDATE_SECONDS = 60
+
+
+async def _serve_kds_screen(websocket: WebSocket, token: str, restaurant_id: UUID) -> None:
+    """Garde l'écran connecté : répond `pong` au `ping`, ignore le reste, et revérifie
+    le rôle de l'utilisateur à intervalles réguliers (un membre retiré perd l'écran)."""
+    while True:
+        try:
+            message = await asyncio.wait_for(
+                websocket.receive(), timeout=KDS_REVALIDATE_SECONDS
+            )
+        except asyncio.TimeoutError:
+            still_allowed = await run_in_threadpool(
+                _authorize_websocket_sync, token, restaurant_id, perm.PRODUCTION_ROLES
+            )
+            if not still_allowed:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+            continue
+        if message.get("type") == "websocket.disconnect":
+            return
+        # Un message non JSON ou binaire n'est pas une erreur : seul « ping » compte.
+        if (message.get("text") or "").strip().lower() == "ping":
+            await websocket.send_text("pong")
 
 
 # -----------------------------------------------------------------------------

@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from contextlib import asynccontextmanager
 from app.api.router import router
 from app.api.exception_handlers import (
@@ -13,6 +15,7 @@ from app.core.database import (
     get_session_local,
 )
 from app.core.config import settings
+from app.core.http_security import SecurityMiddleware
 from app.utils.logging import get_logger
 from app.utils.exceptions import MarinadeException
 import app.models  # register every model with SQLAlchemy metadata
@@ -158,22 +161,39 @@ app = FastAPI(
         },
     ],
     swagger_ui_parameters={"persistAuthorization": True},
+    # Documentation désactivable (désactivée par défaut en production, ASVS 13.4.5).
+    docs_url="/docs" if settings.docs_enabled else None,
+    redoc_url="/redoc" if settings.docs_enabled else None,
+    openapi_url="/openapi.json" if settings.docs_enabled else None,
 )
 
-# Add exception handlers
-app.add_exception_handler(MarinadeException, marinade_exception_handler)
-app.add_exception_handler(Exception, general_exception_handler)
+# Add exception handlers : toutes les erreurs en problem+json (RFC 9457), traduites
+from app.api.exception_handlers import install_problem_handlers  # noqa: E402
+from app.i18n.middleware import LocaleMiddleware  # noqa: E402
+
+install_problem_handlers(app)
+# Langue négociée (Accept-Language) ; Content-Language et Vary sur toutes les réponses.
+app.add_middleware(LocaleMiddleware)
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=settings.ALLOW_CREDENTIALS,
+    # Jamais de credentials avec « * » : Starlette refléterait alors n'importe quelle origine.
+    allow_credentials=settings.cors_allow_credentials,
     allow_methods=settings.cors_methods,
     allow_headers=settings.cors_headers,
-    # Lisibles par le navigateur : total d'une liste paginée, nom du fichier exporté.
-    expose_headers=["X-Total-Count", "Content-Disposition"],
+    # Lisibles par le navigateur : total d'une liste paginée, nom du fichier exporté,
+    # corrélation et délai d'attente après un 429.
+    expose_headers=["X-Total-Count", "Content-Disposition", "X-Request-ID", "Retry-After"],
 )
+# Ajouté après CORS donc exécuté AVANT lui : les en-têtes de sécurité et X-Request-ID
+# figurent aussi sur les réponses CORS (pré-vol compris).
+app.add_middleware(SecurityMiddleware)
+if "*" in settings.cors_origins and settings.ALLOW_CREDENTIALS:
+    logger.warning(
+        "ALLOW_ORIGINS=* : les credentials CORS sont désactivés (refusé en production)."
+    )
 
 # Include the API router
 app.include_router(router)
@@ -196,7 +216,7 @@ def root():
     return {
         "message": settings.APP_NAME,
         "version": settings.APP_VERSION,
-        "docs": "/docs",
+        "docs": "/docs" if settings.docs_enabled else None,
         "environment": settings.ENVIRONMENT,
     }
 
@@ -222,8 +242,43 @@ def health_check():
     }
 
 
+@app.get(
+    "/health/ready",
+    summary="Vérifier la connexion à la base de données",
+    description="""
+    Interroge réellement PostgreSQL et vérifie que le rôle de l'API respecte la RLS.
+    Répond 503 si la base est injoignable ou si le rôle contourne la RLS.
+    Utilisé par le pipeline de déploiement pour valider l'API et la base ensemble.
+    """,
+    tags=["health"],
+    responses={
+        200: {"description": "L'API et la base répondent, RLS effective."},
+        503: {"description": "Base injoignable ou RLS contournée."},
+    },
+)
+def readiness_check():
+    try:
+        with get_session_local()() as db:
+            db.execute(text("SELECT 1"))
+            bypasses = database_role_bypasses_rls(db)
+    except Exception as exc:
+        logger.error(f"Readiness: base de données injoignable: {exc}")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "database": "unreachable"},
+        )
+    if bypasses is not False:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "database": "rls_not_enforced"},
+        )
+    return {"status": "ready", "database": "ok"}
+
+
 if __name__ == "__main__":
     import uvicorn
 
     logger.info(f"Starting server on {settings.HOST}:{settings.PORT}")
-    uvicorn.run(app, host=settings.HOST, port=settings.PORT)
+    # server_header=False : la réponse n'annonce pas « uvicorn ». Derrière un proxy TLS,
+    # lancer uvicorn avec --proxy-headers --forwarded-allow-ips=<ip du proxy>.
+    uvicorn.run(app, host=settings.HOST, port=settings.PORT, server_header=False)

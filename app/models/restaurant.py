@@ -1,6 +1,7 @@
 from sqlalchemy import (
     Column,
     Integer,
+    SmallInteger,
     String,
     DateTime,
     Date,
@@ -12,7 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, UUID, JSONB
 from sqlalchemy.sql import func
 from app.core.database import Base
 from app.utils.enums import TableStatut, CommandeStatut, RefundStatus
@@ -39,6 +40,8 @@ class Restaurant(Base):
     city = Column(String(100), nullable=True)
     country = Column(String(100), nullable=True)
     horaires_ouverture = Column(JSONB, nullable=True)
+    # Fuseau du restaurant (IANA) : dates de réservation, rappels et horaires s'y lisent.
+    timezone = Column(String(64), default="Africa/Douala", nullable=False, server_default="Africa/Douala")
     taux_service = Column(Numeric(5, 2), default=0.0)
     config_jsonb = Column(JSONB, nullable=True)
     is_active = Column(Boolean, default=True)
@@ -67,6 +70,10 @@ class Menu(Base):
     description = Column(Text, nullable=True)
     actif = Column(Boolean, default=True)
     config_jsonb = Column(JSONB, nullable=True)
+    # Validité : NULL = toujours. jours_semaine : 1 (lundi) à 7 (dimanche), NULL = tous les jours.
+    valide_du = Column(Date, nullable=True)
+    valide_au = Column(Date, nullable=True)
+    jours_semaine = Column(ARRAY(SmallInteger), nullable=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(
@@ -94,6 +101,7 @@ class MenuCategory(Base):
     )
     name = Column(String(100), nullable=False)
     ordre = Column(Integer, default=0)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
@@ -117,9 +125,18 @@ class Composant(Base):
     prix_supplement = Column(Numeric(10, 2), default=0, nullable=False)
     devise = Column(String(3), default="XAF", nullable=False)
     disponible = Column(Boolean, default=True, nullable=False)
+    # Unité de référence du stock : toutes les quantités du composant sont stockées dans cette unité.
     stock_unite = Column(String(20), default="portion", nullable=False)
     description = Column(Text, nullable=True)
     attributs_jsonb = Column(JSONB, nullable=True)
+    # Référence interne (code article) et famille (viandes, légumes, boissons…) : filtres et inventaire.
+    code = Column(String(40), nullable=True)
+    categorie = Column(String(60), nullable=True)
+    # Coût d'achat par unité de stock (dernier prix reçu, ou moyenne pondérée) : base du coût de revient.
+    cout_unitaire = Column(Numeric(14, 4), nullable=True)
+    cout_maj_le = Column(DateTime(timezone=True), nullable=True)
+    # Produit à date limite : la réception demande un lot et une date de péremption (sorties FIFO).
+    suit_peremption = Column(Boolean, default=False, nullable=False, server_default="false")
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(
@@ -146,6 +163,8 @@ class Combinaison(Base):
         ForeignKey("restaurants.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Poste de production qui prépare l'article (routage décidé par le catalogue).
+    station = Column(String(30), default="KITCHEN", nullable=False, server_default="KITCHEN")
     menu_id = Column(
         UUID(as_uuid=True), ForeignKey("menus.id", ondelete="SET NULL"), nullable=True
     )
@@ -154,6 +173,9 @@ class Combinaison(Base):
     prix = Column(Numeric(10, 2), nullable=False)
     devise = Column(String(3), default="XAF", nullable=False)
     disponible = Column(Boolean, default=True, nullable=False)
+    photo_url = Column(String(500), nullable=True)
+    taux_tva = Column(Numeric(5, 2), nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -210,6 +232,8 @@ class StockComposant(Base):
     quantite = Column(Numeric(12, 3), default=0, nullable=False)
     reservee = Column(Numeric(12, 3), default=0, nullable=False)
     seuil_alerte = Column(Numeric(12, 3), default=0, nullable=False)
+    # Niveau cible après réapprovisionnement (« par level ») : sert à proposer la quantité à commander.
+    stock_cible = Column(Numeric(12, 3), default=0, nullable=False, server_default="0")
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -234,14 +258,32 @@ class StockMouvement(Base):
         ForeignKey("composants.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Journal : restaurant (isolation et requêtes directes), delta signé, stock après le mouvement,
+    # motif normalisé, auteur, lot touché et coût unitaire au moment du mouvement (valorisation des pertes).
+    restaurant_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("restaurants.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     type = Column(String(20), nullable=False)
     quantite = Column(Numeric(12, 3), nullable=False)
+    delta = Column(Numeric(12, 3), nullable=True)
+    stock_apres = Column(Numeric(12, 3), nullable=True)
+    motif = Column(String(40), nullable=True)
+    acteur_user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    lot_id = Column(
+        UUID(as_uuid=True), ForeignKey("stock_lots.id", ondelete="SET NULL"), nullable=True
+    )
+    cout_unitaire = Column(Numeric(14, 4), nullable=True)
     reference_type = Column(String(30), nullable=True)
     reference_id = Column(UUID(as_uuid=True), nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
+        Index("idx_stock_mouvement_restaurant_date", "restaurant_id", "created_at"),
         Index("idx_stock_mouvement_composant", "composant_id"),
         Index("idx_stock_mouvement_date", "created_at"),
         Index("idx_stock_mouvement_composant_date", "composant_id", "created_at"),
@@ -258,6 +300,8 @@ class Plat(Base):
         ForeignKey("restaurants.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Poste de production qui prépare l'article (routage décidé par le catalogue).
+    station = Column(String(30), default="KITCHEN", nullable=False, server_default="KITCHEN")
     category_id = Column(
         UUID(as_uuid=True),
         ForeignKey("menu_categories.id", ondelete="SET NULL"),
@@ -272,6 +316,9 @@ class Plat(Base):
     photo_url = Column(String(500), nullable=True)
     temps_preparation = Column(Integer, nullable=True)
     attributs_jsonb = Column(JSONB, nullable=True)
+    # Ordre d'affichage dans sa catégorie (glisser-déposer) ; TVA propre à l'article (NULL = taux du restaurant).
+    ordre = Column(Integer, default=0, nullable=False, server_default="0")
+    taux_tva = Column(Numeric(5, 2), nullable=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(
@@ -302,6 +349,8 @@ class PlatComposant(Base):
     quantite = Column(Numeric(12, 3), default=1, nullable=False)
     unite = Column(String(20), default="portion", nullable=False)
     ordre = Column(Integer, default=0)
+    # Rendement de préparation (0,8 = 20 % de perte à l'épluchage) : la sortie de stock est quantite / rendement.
+    rendement = Column(Numeric(5, 4), default=1, nullable=False, server_default="1")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
@@ -322,6 +371,8 @@ class Boisson(Base):
         ForeignKey("restaurants.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Poste de production qui prépare l'article (routage décidé par le catalogue).
+    station = Column(String(30), default="BAR", nullable=False, server_default="BAR")
     nom = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     prix = Column(Numeric(10, 2), nullable=False)
@@ -330,6 +381,9 @@ class Boisson(Base):
     disponible = Column(Boolean, default=True)
     category = Column(String(50), nullable=True)
     attributs_jsonb = Column(JSONB, nullable=True)
+    photo_url = Column(String(500), nullable=True)
+    ordre = Column(Integer, default=0, nullable=False, server_default="0")
+    taux_tva = Column(Numeric(5, 2), nullable=True)
     # Stock : une boisson peut consommer un composant (une bouteille, une dose).
     # Sans lien, elle se vend sans mouvement de stock.
     composant_id = Column(
@@ -415,6 +469,8 @@ class Commande(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     refund_idempotency_key = Column(UUID(as_uuid=True), nullable=True, unique=True)
+    # Garde d'idempotence : posé dans la transaction qui sort le stock ; jamais deux sorties.
+    stock_consomme_at = Column(DateTime(timezone=True), nullable=True)
     metadata_jsonb = Column(JSONB, nullable=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -533,3 +589,17 @@ class CommandeRefund(Base):
             name="check_refund_status_valid",
         ),
     )
+
+
+# Filet de sécurité : un mouvement écrit sans restaurant reçoit celui de son composant. Le moteur de
+# stock renseigne désormais ``restaurant_id`` explicitement ; ceci protège les écritures historiques
+# (import, scripts) sans jamais masquer un composant inconnu (la clé étrangère échouera alors).
+from sqlalchemy import event, select  # noqa: E402
+
+
+@event.listens_for(StockMouvement, "before_insert")
+def _fill_mouvement_restaurant(mapper, connection, target):
+    if target.restaurant_id is None and target.composant_id is not None:
+        target.restaurant_id = connection.execute(
+            select(Composant.restaurant_id).where(Composant.id == target.composant_id)
+        ).scalar()

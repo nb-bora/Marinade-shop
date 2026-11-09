@@ -1,8 +1,15 @@
 from typing import List, Optional
 from urllib.parse import quote_plus
 
-from pydantic import model_validator
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_ALLOWED_JWT_ALGORITHMS = frozenset({"HS256", "HS384", "HS512"})
+_DEFAULT_SECRETS = frozenset(
+    {"your-secret-key-here-change-this-in-production", "changeme", "secret"}
+)
+_DEFAULT_DB_PASSWORDS = frozenset({"postgres", "password", "changeme", "admin", "root", ""})
 
 
 class Settings(BaseSettings):
@@ -23,12 +30,37 @@ class Settings(BaseSettings):
 
     SECRET_KEY: str = "your-secret-key-here-change-this-in-production"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    # Jetons d'accès courts : une session révoquée l'est au plus tard à leur expiration
+    # (en pratique immédiatement : chaque requête vérifie la session, voir dependencies).
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    # Durée d'inactivité d'une session : chaque jeton de rafraîchissement vit ce temps.
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # Durée de vie absolue d'une session, rotations comprises (ASVS 7.3.2).
+    SESSION_ABSOLUTE_LIFETIME_DAYS: int = 30
+    JWT_ISSUER: str = "marinade-api"
+    JWT_AUDIENCE: str = "marinade-clients"
     RESET_TOKEN_EXPIRE_MINUTES: int = 15
     VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
 
+    # --- Emails (voir app/services/email_service.py) ---
+    # auto | smtp | console | memory | disabled. « auto » : SMTP dès que les identifiants
+    # sont renseignés, sinon simple journalisation (aucun email ne part).
+    EMAIL_BACKEND: str = "auto"
+    # Avec Gmail, l'expéditeur DOIT être l'adresse du compte SMTP (sinon réécrit par Google).
     EMAIL_FROM: str = "noreply@marinade.local"
+    EMAIL_FROM_NAME: str = "Marinade"
+    EMAIL_REPLY_TO: Optional[str] = None
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    # Mot de passe d'application (jamais le mot de passe du compte) ; les espaces sont ignorés.
+    SMTP_PASSWORD: Optional[SecretStr] = None
+    # starttls (587) | ssl (465) | none
+    SMTP_SECURITY: str = "starttls"
+    SMTP_TIMEOUT_SECONDS: float = 15.0
+    SMTP_MAX_ATTEMPTS: int = 3
+    # Adresse publique de l'interface web, pour les liens des emails.
+    FRONTEND_URL: str = "http://localhost:5173"
     TWO_FACTOR_ISSUER: str = "Marinade"
     # Clé dédiée au chiffrement des secrets TOTP au repos. À défaut, SECRET_KEY
     # est utilisée : la faire tourner invalide alors les secrets 2FA existants.
@@ -70,9 +102,47 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8000
 
+    # Écrans cuisine/bar : un ticket plus ancien que cette fenêtre n'est plus affiché
+    # et est annulé à la clôture de sa session.
+    KDS_TICKET_WINDOW_HOURS: int = 12
+
+    # --- Sécurité HTTP (ASVS V3/V4/V13) ---
+    # Documentation interactive (/docs, /redoc, /openapi.json). Vide = active hors production.
+    DOCS_ENABLED: Optional[bool] = None
+    # Strict-Transport-Security. Vide = active en production (TLS terminé par le proxy).
+    HSTS_ENABLED: Optional[bool] = None
+    HSTS_MAX_AGE_SECONDS: int = 31_536_000
+    # Taille maximale d'un corps de requête JSON/formulaire hors import de fichier.
+    MAX_REQUEST_BODY_BYTES: int = 6 * 1024 * 1024
+
+    # --- Limitation de débit et verrouillage (ASVS V6.3.1 / V2.4.1) ---
+    # Compteurs stockés en base (table auth_throttle) : partagés entre workers.
+    RATE_LIMIT_ENABLED: bool = True
+    # Échecs de connexion tolérés par identifiant avant verrouillage, puis durée du
+    # premier verrouillage (doublée à chaque nouvel échec, plafonnée).
+    LOCKOUT_THRESHOLD: int = 5
+    LOCKOUT_BASE_SECONDS: int = 60
+    LOCKOUT_MAX_SECONDS: int = 3600
+    # Vérification facultative contre HaveIBeenPwned (k-anonymat, 5 premiers caractères
+    # du SHA-1 seulement). La liste locale des 10 000 mots de passe courants s'applique toujours.
+    PASSWORD_HIBP_CHECK: bool = False
+
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT.lower() in {"production", "prod", "staging"}
+
+    @property
+    def docs_enabled(self) -> bool:
+        return (not self.is_production) if self.DOCS_ENABLED is None else self.DOCS_ENABLED
+
+    @property
+    def hsts_enabled(self) -> bool:
+        return self.is_production if self.HSTS_ENABLED is None else self.HSTS_ENABLED
+
+    @property
+    def cors_allow_credentials(self) -> bool:
+        """Jamais de credentials avec l'origine « * » (Starlette refléterait toute origine)."""
+        return self.ALLOW_CREDENTIALS and "*" not in self.cors_origins
 
     @property
     def DATABASE_URL(self) -> str:
@@ -82,20 +152,52 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security_configuration(self):
+        if self.ALGORITHM not in _ALLOWED_JWT_ALGORITHMS:
+            raise ValueError(
+                f"ALGORITHM must be one of {sorted(_ALLOWED_JWT_ALGORITHMS)} (HMAC, fixed server side)"
+            )
+        if self.SMTP_SECURITY.lower() not in {"starttls", "ssl", "none"}:
+            raise ValueError("SMTP_SECURITY must be starttls, ssl or none")
+        if self.EMAIL_BACKEND.lower() not in {"auto", "smtp", "console", "memory", "disabled"}:
+            raise ValueError("EMAIL_BACKEND must be auto, smtp, console, memory or disabled")
         if self.is_production:
+            if self.SMTP_SECURITY.lower() == "none" and self.EMAIL_BACKEND.lower() in {"auto", "smtp"}:
+                raise ValueError("SMTP_SECURITY=none is forbidden in production (credentials in clear)")
             if (
-                self.SECRET_KEY == "your-secret-key-here-change-this-in-production"
+                self.SECRET_KEY in _DEFAULT_SECRETS
                 or len(self.SECRET_KEY) < 32
             ):
                 raise ValueError(
                     "SECRET_KEY must be a private random value of at least 32 characters in production"
                 )
+            if self.DB_PASSWORD in _DEFAULT_DB_PASSWORDS or len(self.DB_PASSWORD) < 12:
+                raise ValueError(
+                    "DB_PASSWORD must not be a default value and needs at least 12 characters in production"
+                )
+            if self.DB_HOST not in {"localhost", "127.0.0.1", "::1"} and self.DB_SSLMODE not in {
+                "require", "verify-ca", "verify-full"
+            }:
+                raise ValueError(
+                    "DB_SSLMODE must be require, verify-ca or verify-full for a remote database in production"
+                )
+            if self.TWO_FACTOR_ENCRYPTION_KEY is not None and len(self.TWO_FACTOR_ENCRYPTION_KEY) < 32:
+                raise ValueError("TWO_FACTOR_ENCRYPTION_KEY needs at least 32 characters")
             if self.DEBUG:
                 raise ValueError("DEBUG must be false in production")
-            if self.ALLOW_ORIGINS.strip() == "*" or not self.ALLOW_ORIGINS.strip():
+            if not self.RATE_LIMIT_ENABLED:
+                raise ValueError("RATE_LIMIT_ENABLED must be true in production")
+            if self.ACCESS_TOKEN_EXPIRE_MINUTES > 30:
+                raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES must not exceed 30 in production")
+            if "*" in self.cors_origins or not self.cors_origins:
                 raise ValueError(
                     "ALLOW_ORIGINS must be an explicit allow-list in production"
                 )
+            if any(not o.startswith("https://") for o in self.cors_origins):
+                raise ValueError("ALLOW_ORIGINS must only list https:// origins in production")
+            if self.ALLOW_CREDENTIALS and (
+                self.ALLOW_HEADERS.strip() == "*"
+            ):
+                raise ValueError("Wildcard headers cannot be used with credentialed CORS")
             if not self.SKIP_DB_INIT:
                 raise ValueError(
                     "SKIP_DB_INIT must remain true in production; use Alembic"
